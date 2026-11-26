@@ -173,10 +173,15 @@ async function handleApi(request, env, path) {
   if (!auth.user) return auth.error;
   const userId = auth.user.id;
 
+  if (path === "/api/auth/password/challenge" && method === "GET") {
+    const account = await env.DB.prepare("SELECT password_salt,password_iterations,password_hash_scheme FROM users WHERE id=?").bind(userId).first();
+    if (!account) return json({ error: "Account not found." }, 404);
+    return json({ salt: account.password_salt, iterations: Number(account.password_iterations), scheme: account.password_hash_scheme || "pbkdf2-server" });
+  }
   if (path === "/api/auth/password" && method === "POST") {
     const data = await body(request);
-    if (!data || typeof data.current_password !== "string" || typeof data.new_password !== "string") return json({ error: "Enter your current and new passwords." }, 400);
-    if (data.new_password.length < 10 || data.new_password.length > 128) return json({ error: "Use a new password between 10 and 128 characters." }, 400);
+    if (!data || typeof data.new_salt !== "string" || typeof data.new_verifier !== "string") return json({ error: "Enter your current and new passwords." }, 400);
+    if (!validHex(data.new_salt, 32) || !validHex(data.new_verifier, 64)) return json({ error: "Your new password could not be verified." }, 400);
     if (await rateLimited(request, env, "password-change", 5, 3600)) return json({ error: "Too many password-change attempts. Try again later." }, 429);
     const account = await env.DB.prepare("SELECT password_salt,password_hash,password_iterations FROM users WHERE id=?").bind(userId).first();
     if (!account) return json({ error: "Account not found." }, 404);
