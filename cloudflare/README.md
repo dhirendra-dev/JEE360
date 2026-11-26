@@ -5,6 +5,7 @@ JEE360 is deployed as an independent Cloudflare Worker with a dedicated D1 datab
 ## Included
 
 - Email/password account registration and sign-in
+- Authenticated password changes with current-password verification and session rotation
 - PBKDF2-SHA-256 password hashing with per-account random salts
 - Opaque, hashed, HttpOnly, Secure, SameSite=Lax session cookies (30-day expiry)
 - Per-account task and subject records
