@@ -163,7 +163,7 @@ missing. Postgres and Better Auth are pre-wired in `src/lib`, **opt-in per app**
   looping on failed installs, and prefer a pure-JS alternative. Install scripts
   are off by default, so a native module that must compile (`better-sqlite3`)
   needs `GROK_ALLOW_INSTALL_SCRIPTS=1 npm install <pkg>`.
-- **The app is deployed to Vercel**, where these fail though locally they don't:
+- **The app is deployed to Cloudflare Workers**, where these fail though locally they don't:
   runtime filesystem writes, server-only Node APIs at import time, dev-only deps,
   hard-coded hosts/ports/secrets (`.grok/references/deploy-target.md`).
 - **Never create a `.env` file** — the platform injects `DATABASE_URL` + auth
@@ -294,12 +294,12 @@ changes. Revive, reboot-wipe and the `startup.sh` worked example:
    D = right** while moving forward (`controls` §5c). Flip one steer/roll sign
    if inverted; retest.
 8. **Verify the PRODUCTION build, not just dev.** Dev (Vite) can render while
-   the deployed Vercel build is blank. Once `npm run build` (step 5) succeeds,
+   the deployed Cloudflare Worker is blank. Once `npm run build:cloudflare` (step 5) succeeds,
    serve the built output with `npm run preview:restart` (loopback
    `127.0.0.1:8081`) and re-run the smoke script with the dev verdict as
    `--baseline`. Watch for
    `Failed to load module script … MIME type "text/html"`.
-   **If you edited source after kicking off the build, re-run `npm run build`
+   **If you edited source after kicking off the build, re-run `npm run build:cloudflare`
    first, then `npm run preview:restart`** — it frees `:8081` first, so you
    never smoke the previous build's output. A clean, non-diverging JSON is
    enough. Mobile (~390×844) is already covered by the combined smoke pass.
