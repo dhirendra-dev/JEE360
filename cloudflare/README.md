@@ -10,6 +10,10 @@ JEE360 is deployed as an independent Cloudflare Worker with a dedicated D1 datab
 - Opaque, hashed, HttpOnly, Secure, SameSite=Lax session cookies (30-day expiry)
 - Per-account task and subject records
 - Study-session logging and daily study goal
+- 25-minute focus and 5-minute break timer; completed focus blocks are saved automatically
+- Seven-day study activity chart, all-time study total, and consecutive study-day streak
+- Task search plus All, Open, Completed, and High-priority filters
+- Subtle entrance, progress, and interaction animations with reduced-motion support
 - Responsive cream-and-blue light theme and balanced dark theme
 - System theme detection, manual theme toggle, and saved theme preference
 - Server-side ownership checks for every private record

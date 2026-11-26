@@ -143,14 +143,47 @@ async function handleApi(request, env, path) {
     return json({ ok: true }, 200, { "set-cookie": cookie(token, SESSION_DAYS * 86400) });
   }
   if (path === "/api/dashboard" && method === "GET") {
+    const todayLocal = new Intl.DateTimeFormat("en-CA", {timeZone:"Asia/Kolkata",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date());
+    const shiftDate = function(value, amount) {
+      const date = new Date(value + "T00:00:00Z");
+      date.setUTCDate(date.getUTCDate() + amount);
+      return date.toISOString().slice(0, 10);
+    };
+    const weekStart = shiftDate(todayLocal, -6);
+    const streakStart = shiftDate(todayLocal, -364);
     const results = await Promise.all([
       env.DB.prepare("SELECT id,title,description,due_date,priority,status,estimated_minutes,subject_id,created_at FROM tasks WHERE user_id=? ORDER BY CASE status WHEN 'in_progress' THEN 0 WHEN 'todo' THEN 1 ELSE 2 END, due_date IS NULL, due_date LIMIT 100").bind(userId).all(),
       env.DB.prepare("SELECT id,name,color FROM subjects WHERE user_id=? ORDER BY name").bind(userId).all(),
-      env.DB.prepare("SELECT COALESCE(SUM(duration_minutes),0) AS total FROM study_sessions WHERE user_id=? AND studied_on=?").bind(userId, new Intl.DateTimeFormat("en-CA", {timeZone:"Asia/Kolkata",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date())).first(),
+      env.DB.prepare("SELECT COALESCE(SUM(duration_minutes),0) AS total FROM study_sessions WHERE user_id=? AND studied_on=?").bind(userId, todayLocal).first(),
       env.DB.prepare("SELECT COUNT(*) AS completed FROM tasks WHERE user_id=? AND status='done'").bind(userId).first(),
-      env.DB.prepare("SELECT target_exam,daily_goal_minutes,timezone FROM user_settings WHERE user_id=?").bind(userId).first()
+      env.DB.prepare("SELECT target_exam,daily_goal_minutes,timezone FROM user_settings WHERE user_id=?").bind(userId).first(),
+      env.DB.prepare("SELECT studied_on,COALESCE(SUM(duration_minutes),0) AS total FROM study_sessions WHERE user_id=? AND studied_on BETWEEN ? AND ? GROUP BY studied_on ORDER BY studied_on").bind(userId, weekStart, todayLocal).all(),
+      env.DB.prepare("SELECT DISTINCT studied_on FROM study_sessions WHERE user_id=? AND studied_on BETWEEN ? AND ? ORDER BY studied_on DESC").bind(userId, streakStart, todayLocal).all(),
+      env.DB.prepare("SELECT COALESCE(SUM(duration_minutes),0) AS total FROM study_sessions WHERE user_id=?").bind(userId).first()
     ]);
-    return json({ tasks: results[0].results, subjects: results[1].results, today_minutes: results[2].total, completed: results[3].completed, settings: results[4] || { target_exam: "JEE Main + Advanced", daily_goal_minutes: 360, timezone: "Asia/Kolkata" } });
+    const studyDates = new Set(results[6].results.map(function(row) { return row.studied_on; }));
+    let streakCursor = studyDates.has(todayLocal) ? todayLocal : shiftDate(todayLocal, -1);
+    let streakDays = 0;
+    while (studyDates.has(streakCursor) && streakDays < 365) {
+      streakDays += 1;
+      streakCursor = shiftDate(streakCursor, -1);
+    }
+    const weeklyMinutes = [];
+    for (let offset = 0; offset < 7; offset++) {
+      const date = shiftDate(weekStart, offset);
+      const row = results[5].results.find(function(item) { return item.studied_on === date; });
+      weeklyMinutes.push({ date: date, minutes: Number(row ? row.total : 0) });
+    }
+    return json({
+      tasks: results[0].results,
+      subjects: results[1].results,
+      today_minutes: results[2].total,
+      completed: results[3].completed,
+      settings: results[4] || { target_exam: "JEE Main + Advanced", daily_goal_minutes: 360, timezone: "Asia/Kolkata" },
+      weekly_minutes: weeklyMinutes,
+      streak_days: streakDays,
+      all_time_minutes: results[7].total
+    });
   }
   if (path === "/api/tasks" && method === "POST") {
     const data = await body(request);
@@ -232,16 +265,81 @@ const PAGE = String.raw`<!doctype html>
 .formrow{display:flex;gap:8px}.field{width:100%;border:1px solid var(--line-strong);background:var(--surface);color:var(--text);border-radius:9px;padding:10px 11px;outline:none;transition:border-color .15s,box-shadow .15s}.field:focus{border-color:var(--blue);box-shadow:0 0 0 3px var(--focus)}.field::placeholder{color:var(--muted)}label{display:block;font-size:12px;color:var(--muted);font-weight:600;margin:12px 0 6px}.stack{display:grid;gap:10px}.subject{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--line);font-size:13px}.dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:9px}
 .modal{position:fixed;inset:0;background:rgba(18,28,43,.48);display:grid;place-items:center;padding:16px;z-index:5;backdrop-filter:blur(3px)}.modalbox{width:min(440px,100%);background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:23px;box-shadow:0 22px 70px rgba(20,35,55,.2)}.modalbox h2{margin:0 0 4px}.authwrap{min-height:100vh;display:grid;place-items:center;padding:24px;background:var(--bg)}.authcard{width:min(430px,100%);padding:30px}.authcard h2{font-size:27px;letter-spacing:-.8px;margin:0 0 4px}.authbrand{display:flex;justify-content:space-between;align-items:center;margin-bottom:28px}.notice{font-size:12px;color:var(--muted);margin-top:15px}.empty{padding:24px;text-align:center;color:var(--muted);border:1px dashed var(--line-strong);border-radius:10px;background:var(--surface-soft)}.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);padding:10px 15px;border-radius:9px;background:var(--text);color:var(--bg);font-weight:650;font-size:13px;z-index:10;box-shadow:var(--shadow)}.foot{padding:22px 0;color:var(--muted);text-align:center;font-size:11px}
 @media(max-width:850px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.layout{grid-template-columns:1fr}.hero{align-items:start;flex-direction:column}.app{padding:20px}}@media(max-width:520px){.app{padding:15px 13px 26px}.top{align-items:flex-start}.topright{gap:6px;flex-wrap:wrap;justify-content:flex-end}.topright .pill{display:none}.theme-toggle{padding:7px 9px}.theme-toggle .theme-label{display:none}.grid{gap:8px}.card{padding:14px;border-radius:12px}.stat{font-size:24px}.formrow{flex-wrap:wrap}.hero h2{font-size:27px}.task{gap:8px;padding:10px}.priority{display:none}.authcard{padding:22px}.authbrand{margin-bottom:22px}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;scroll-behavior:auto!important}}
+
+.grid{grid-template-columns:repeat(5,minmax(0,1fr))}
+.feature-row{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(290px,1fr);gap:12px;margin:14px 0 16px}
+.insight-card,.timer-card{min-width:0}
+.week-bars{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:10px;align-items:end;height:132px;padding:10px 2px 0}
+.week-col{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:7px;min-width:0;height:100%}
+.week-value{font-size:10px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+.week-track{height:82px;width:min(100%,34px);display:flex;align-items:flex-end;background:var(--surface-soft);border-radius:8px 8px 5px 5px;overflow:hidden}
+.week-fill{display:block;width:100%;min-height:3px;background:linear-gradient(180deg,var(--cyan),var(--blue));border-radius:7px 7px 4px 4px;transition:height .75s cubic-bezier(.2,.8,.2,1)}
+.week-day{font-size:10px;color:var(--muted)}
+.week-summary{display:flex;gap:18px;flex-wrap:wrap;padding-top:13px;border-top:1px solid var(--line);margin-top:8px}
+.week-summary strong{display:block;font-size:17px;letter-spacing:-.4px}
+.week-summary span{font-size:11px;color:var(--muted)}
+.focus-layout{display:grid;grid-template-columns:132px minmax(0,1fr);align-items:center;gap:15px;margin-top:10px}
+.timer-ring{width:132px;height:132px;position:relative;display:grid;place-items:center}
+.timer-ring svg{width:132px;height:132px;transform:rotate(-90deg);overflow:visible}
+.timer-track{stroke:var(--surface-blue);stroke-width:7;fill:none}
+.timer-progress{stroke:var(--blue);stroke-width:7;stroke-linecap:round;fill:none;stroke-dasharray:314.16;stroke-dashoffset:314.16;transition:stroke-dashoffset .35s linear}
+.timer-readout{position:absolute;font-size:27px;letter-spacing:-1.4px;font-weight:750;font-variant-numeric:tabular-nums}
+.timer-status{font-size:11px;color:var(--muted);margin-top:3px;text-align:center}
+.timer-modes{display:flex;gap:6px;margin-bottom:10px}
+.timer-mode{border:1px solid var(--line);background:var(--surface-soft);color:var(--muted);padding:6px 9px;border-radius:8px;font-size:11px;font-weight:650}
+.timer-mode[aria-pressed="true"]{background:var(--blue-soft);border-color:var(--line-strong);color:var(--blue-strong)}
+.timer-actions{display:flex;gap:7px;margin-top:11px}
+.timer-actions .btn{flex:1;padding:8px 10px}
+.timer-note{font-size:10px;color:var(--muted);margin-top:9px}
+.task-tools{display:grid;grid-template-columns:minmax(0,1fr) 145px;gap:8px;margin:12px 0 10px}
+.task-tools .field{padding:8px 10px;font-size:12px}
+.task{transition:background .18s ease,border-color .18s ease,transform .18s ease}
+.task:hover{transform:translateY(-1px);background:var(--surface-soft)}
+.card{animation:riseIn .48s both}
+.grid .card:nth-child(2){animation-delay:.04s}.grid .card:nth-child(3){animation-delay:.08s}.grid .card:nth-child(4){animation-delay:.12s}.grid .card:nth-child(5){animation-delay:.16s}
+.feature-row .card:first-child{animation-delay:.08s}.feature-row .card:last-child{animation-delay:.14s}
+.btn{transition:background .16s,border-color .16s,transform .16s,box-shadow .16s}
+.btn:hover{transform:translateY(-1px);box-shadow:0 5px 14px rgba(55,82,132,.1)}
+@keyframes riseIn{from{opacity:0;transform:translateY(11px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:850px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.feature-row{grid-template-columns:1fr}}
+@media(max-width:520px){.feature-row{gap:9px}.focus-layout{grid-template-columns:112px minmax(0,1fr);gap:10px}.timer-ring,.timer-ring svg{width:112px;height:112px}.timer-readout{font-size:23px}.task-tools{grid-template-columns:1fr 118px}.week-bars{gap:5px}.week-track{width:min(100%,28px)}.week-summary{gap:14px}}
+@media(prefers-reduced-motion:reduce){.card,.grid .card,.feature-row .card{animation:none!important}.task,.btn,.week-fill,.timer-progress{transition:none!important}}
 </style></head><body>
 <div id="auth" class="authwrap"><div class="card authcard"><div class="authbrand"><div class="brand"><div class="logo" aria-label="JEE360 logo"><svg viewBox="0 0 40 40" fill="none" role="img" aria-hidden="true"><circle cx="20" cy="20" r="14.2" stroke="white" stroke-width="1.7" opacity=".72"/><path d="M20 4.8v4.1M35.2 20h-4.1M20 35.2v-4.1M4.8 20h4.1" stroke="white" stroke-width="1.8" stroke-linecap="round"/><path d="M13.2 25.9 18.1 14l3.1 8.1 5.6-7.2" stroke="white" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="27.1" cy="14.7" r="2" fill="white"/></svg></div><div><h1>JEE360</h1><small>Preparation OS</small></div></div><button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch colour theme"><span class="theme-symbol">☾</span><span class="theme-label">Dark mode</span></button></div><div class="eyebrow">Your next chapter starts here</div><h2 id="authTitle">Welcome back.</h2><p id="authSub" class="muted">Sign in to continue your preparation.</p><form id="authForm"><div id="nameField" class="hidden"><label>Your name</label><input class="field" id="name" maxlength="60" autocomplete="name" placeholder="Your name"></div><label>Email address</label><input class="field" id="email" type="email" required autocomplete="email" placeholder="you@example.com"><label>Password</label><input class="field" id="password" type="password" minlength="10" required autocomplete="current-password" placeholder="At least 10 characters"><button class="btn" style="width:100%;margin-top:18px" id="authSubmit">Sign in</button></form><p class="notice" id="authError"></p><p class="notice">New here? <button class="btn ghost" id="toggleAuth" type="button">Create account</button></p><p class="notice">Your study data is private to your account.</p></div></div>
 <div id="app" class="app hidden"><header class="top"><div class="brand"><div class="logo" aria-label="JEE360 logo"><svg viewBox="0 0 40 40" fill="none" role="img" aria-hidden="true"><circle cx="20" cy="20" r="14.2" stroke="white" stroke-width="1.7" opacity=".72"/><path d="M20 4.8v4.1M35.2 20h-4.1M20 35.2v-4.1M4.8 20h4.1" stroke="white" stroke-width="1.8" stroke-linecap="round"/><path d="M13.2 25.9 18.1 14l3.1 8.1 5.6-7.2" stroke="white" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="27.1" cy="14.7" r="2" fill="white"/></svg></div><div><h1>JEE360</h1><small>Preparation OS</small></div></div><div class="topright"><span class="pill" id="today"></span><span class="pill" id="userName"></span><button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch colour theme"><span class="theme-symbol">☾</span><span class="theme-label">Dark mode</span></button><button class="btn ghost" id="logout">Sign out</button></div></header>
 <div class="hero"><div><div class="eyebrow">Your preparation, in focus</div><h2 id="greeting">Make today count.</h2><p>Small consistent sessions. Measurable progress. One goal at a time.</p></div><button class="btn" id="addTaskTop">＋ Add task</button></div>
-<div class="grid"><div class="card"><div class="stat-label">Study time today</div><div class="stat" id="studyTime">0m</div><div class="stat-sub">Your daily learning streak starts here</div><div class="progress"><span id="goalBar" style="width:0%"></span></div></div><div class="card"><div class="stat-label">Daily study goal</div><div class="stat" id="goalText">6h</div><div class="stat-sub">Personal target</div></div><div class="card"><div class="stat-label">Tasks completed</div><div class="stat" id="doneCount">0</div><div class="stat-sub">All-time completed tasks</div></div><div class="card"><div class="stat-label">Tasks remaining</div><div class="stat" id="remainingCount">0</div><div class="stat-sub">Keep moving forward</div></div></div>
-<div class="layout"><section class="card"><div class="section-head"><h3>Today's focus</h3><button class="btn secondary" id="addTask">＋ New task</button></div><div id="tasks" class="task-list"><div class="empty">Loading your planner…</div></div></section><aside class="stack"><section class="card"><div class="section-head"><h3>Study subjects</h3><button class="btn ghost" id="addSubject">＋ Add</button></div><div id="subjects"></div></section><section class="card"><div class="section-head"><h3>Log a study session</h3></div><form id="studyForm"><label>What did you study?</label><input class="field" id="studyTitle" placeholder="e.g. Laws of Motion practice"><label>Subject</label><select class="field" id="studySubject"><option value="">General study</option></select><label>Duration (minutes)</label><input class="field" id="studyMinutes" type="number" min="1" max="1440" value="60" required><button class="btn" style="width:100%;margin-top:13px">Save study session</button></form></section><section class="card"><div class="section-head"><h3>Daily target</h3></div><label>Minutes per day</label><input class="field" id="dailyGoal" type="number" min="30" max="1440" value="360"><button class="btn secondary" style="width:100%;margin-top:10px" id="saveGoal">Update goal</button></section><section class="card"><div class="section-head"><h3>Account security</h3></div><form id="passwordForm"><label>Current password</label><input class="field" id="currentPassword" type="password" autocomplete="current-password" required><label>New password</label><input class="field" id="newPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" required><button class="btn secondary" style="width:100%;margin-top:12px">Change password</button></form><p class="notice">Changing your password signs out other active sessions.</p></section></aside></div><div class="foot">JEE360 · Built for focused preparation · Your data is saved securely to your account</div></div>
+<div class="grid">
+<div class="card"><div class="stat-label">Study time today</div><div class="stat" id="studyTime">0m</div><div class="stat-sub">Your effort, logged today</div><div class="progress"><span id="goalBar" style="width:0%"></span></div></div>
+<div class="card"><div class="stat-label">Daily study goal</div><div class="stat" id="goalText">6h</div><div class="stat-sub">Your personal target</div></div>
+<div class="card"><div class="stat-label">Tasks completed</div><div class="stat" id="doneCount">0</div><div class="stat-sub">All-time completed tasks</div></div>
+<div class="card"><div class="stat-label">Tasks remaining</div><div class="stat" id="remainingCount">0</div><div class="stat-sub">Still on your list</div></div>
+<div class="card"><div class="stat-label">Current streak</div><div class="stat" id="streakCount">0d</div><div class="stat-sub">Consecutive study days</div></div>
+</div>
+<div class="feature-row">
+<section class="card insight-card">
+<div class="section-head"><h3>Weekly study activity</h3><span class="muted" id="weekLabel" style="font-size:11px">Last 7 days</span></div>
+<div id="weekBars" class="week-bars" aria-label="Study minutes for the last seven days"></div>
+<div class="week-summary"><div><strong id="weekTotal">0m</strong><span>Total this week</span></div><div><strong id="weekAverage">0m</strong><span>Daily average</span></div><div><strong id="allTimeStudy">0h</strong><span>All-time study</span></div></div>
+</section>
+<section class="card timer-card">
+<div class="section-head"><h3>Focus timer</h3><span class="muted" style="font-size:11px">Pomodoro</span></div>
+<div class="focus-layout">
+<div><div class="timer-ring"><svg viewBox="0 0 116 116" aria-hidden="true"><circle class="timer-track" cx="58" cy="58" r="50"></circle><circle id="timerProgress" class="timer-progress" cx="58" cy="58" r="50"></circle></svg><div class="timer-readout" id="timerReadout">25:00</div></div><div class="timer-status" id="timerStatus">Ready to focus</div></div>
+<div>
+<div class="timer-modes"><button type="button" class="timer-mode" data-mode="focus" aria-pressed="true">Focus 25m</button><button type="button" class="timer-mode" data-mode="break" aria-pressed="false">Break 5m</button></div>
+<label for="focusSubject">Study subject</label><select class="field" id="focusSubject"><option value="">General study</option></select>
+<div class="timer-actions"><button type="button" class="btn" id="timerStart">Start</button><button type="button" class="btn secondary" id="timerReset">Reset</button></div>
+</div>
+</div>
+<div class="timer-note">Completed focus blocks are automatically added to your study log.</div>
+</section>
+</div>
+<div class="layout"><section class="card"><div class="section-head"><h3>Today's focus</h3><button class="btn secondary" id="addTask">＋ New task</button></div><div class="task-tools"><input class="field" id="taskSearch" type="search" placeholder="Search your tasks…" aria-label="Search tasks"><select class="field" id="taskFilter" aria-label="Filter tasks"><option value="all">All tasks</option><option value="open">Open tasks</option><option value="done">Completed</option><option value="high">High priority</option></select></div><div id="tasks" class="task-list"><div class="empty">Loading your planner…</div></div></section><aside class="stack"><section class="card"><div class="section-head"><h3>Study subjects</h3><button class="btn ghost" id="addSubject">＋ Add</button></div><div id="subjects"></div></section><section class="card"><div class="section-head"><h3>Log a study session</h3></div><form id="studyForm"><label>What did you study?</label><input class="field" id="studyTitle" placeholder="e.g. Laws of Motion practice"><label>Subject</label><select class="field" id="studySubject"><option value="">General study</option></select><label>Duration (minutes)</label><input class="field" id="studyMinutes" type="number" min="1" max="1440" value="60" required><button class="btn" style="width:100%;margin-top:13px">Save study session</button></form></section><section class="card"><div class="section-head"><h3>Daily target</h3></div><label>Minutes per day</label><input class="field" id="dailyGoal" type="number" min="30" max="1440" value="360"><button class="btn secondary" style="width:100%;margin-top:10px" id="saveGoal">Update goal</button></section><section class="card"><div class="section-head"><h3>Account security</h3></div><form id="passwordForm"><label>Current password</label><input class="field" id="currentPassword" type="password" autocomplete="current-password" required><label>New password</label><input class="field" id="newPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" required><button class="btn secondary" style="width:100%;margin-top:12px">Change password</button></form><p class="notice">Changing your password signs out other active sessions.</p></section></aside></div><div class="foot">JEE360 · Built for focused preparation · Your data is saved securely to your account</div></div>
 <div id="taskModal" class="modal hidden"><div class="modalbox"><div class="section-head"><h3>Create a task</h3><button class="btn ghost" id="closeTask">✕</button></div><form id="taskForm"><label>Task title</label><input class="field" id="taskTitle" maxlength="140" required placeholder="e.g. Complete friction PYQs"><label>Description (optional)</label><input class="field" id="taskDescription" maxlength="1000" placeholder="Add a short note"><label>Subject</label><select class="field" id="taskSubject"><option value="">No subject</option></select><div class="formrow"><div style="flex:1"><label>Priority</label><select class="field" id="taskPriority"><option value="medium">Medium</option><option value="high">High</option><option value="low">Low</option></select></div><div style="flex:1"><label>Estimated minutes</label><input class="field" id="taskMinutes" type="number" min="5" max="1440" value="45"></div></div><label>Due date</label><input class="field" id="taskDate" type="date"><button class="btn" style="width:100%;margin-top:18px">Create task</button></form></div></div>
 <div id="subjectModal" class="modal hidden"><div class="modalbox"><div class="section-head"><h3>Add a subject</h3><button class="btn ghost" id="closeSubject">✕</button></div><form id="subjectForm"><label>Subject name</label><input class="field" id="subjectName" required maxlength="50" placeholder="Physics"><button class="btn" style="width:100%;margin-top:18px">Add subject</button></form></div></div><div id="toast" class="toast hidden"></div>
 <script>
-var state={user:null,tasks:[],subjects:[],settings:{daily_goal_minutes:360}};
+var state={user:null,tasks:[],subjects:[],settings:{daily_goal_minutes:360},weekly_minutes:[],streak_days:0,all_time_minutes:0};
+var timer={mode:"focus",duration:1500,remaining:1500,running:false,deadline:0,handle:null};
 function el(id){return document.getElementById(id)}
 function applyTheme(theme){var selected=theme==="dark"?"dark":"light";document.documentElement.dataset.theme=selected;try{localStorage.setItem("jee360-theme",selected)}catch(e){}document.querySelectorAll("[data-theme-toggle]").forEach(function(btn){var dark=selected==="dark";var symbol=btn.querySelector(".theme-symbol");var label=btn.querySelector(".theme-label");if(symbol)symbol.textContent=dark?"☀":"☾";if(label)label.textContent=dark?"Light mode":"Dark mode";btn.setAttribute("aria-label",dark?"Switch to light mode":"Switch to dark mode");btn.setAttribute("aria-pressed",dark?"true":"false")})}
 function initTheme(){var saved=null;try{saved=localStorage.getItem("jee360-theme")}catch(e){}var initial=saved||(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light");applyTheme(initial);document.querySelectorAll("[data-theme-toggle]").forEach(function(btn){btn.addEventListener("click",function(){applyTheme(document.documentElement.dataset.theme==="dark"?"light":"dark")})})}
@@ -253,8 +351,66 @@ function escapeHtml(s){return String(s||"").replace(/[&<>"']/g,function(c){retur
 function openModal(id){el(id).classList.remove("hidden")}
 function closeModal(id){el(id).classList.add("hidden")}
 function authMode(signup){el("authTitle").textContent=signup?"Create your account.":"Welcome back.";el("authSub").textContent=signup?"Your personal study space is one step away.":"Sign in to continue your preparation.";el("nameField").classList.toggle("hidden",!signup);el("authSubmit").textContent=signup?"Create account":"Sign in";el("toggleAuth").textContent=signup?"I already have an account":"Create account";el("password").autocomplete=signup?"new-password":"current-password";el("auth").dataset.signup=signup?"1":"0";el("authError").textContent=""}
-function render(){var done=state.tasks.filter(function(t){return t.status==="done"}).length;var remaining=state.tasks.length-done;var mins=Number(state.today_minutes)||0;var goal=Number(state.settings.daily_goal_minutes)||360;el("studyTime").textContent=mins>=60?Math.floor(mins/60)+"h "+mins%60+"m":mins+"m";el("goalText").textContent=goal>=60?(goal/60).toFixed(goal%60?1:0)+"h":goal+"m";el("goalBar").style.width=Math.min(100,mins/goal*100)+"%";el("doneCount").textContent=state.completed||done;el("remainingCount").textContent=remaining;el("dailyGoal").value=goal;el("userName").textContent=state.user.display_name;el("today").textContent=new Intl.DateTimeFormat("en-IN",{weekday:"short",day:"numeric",month:"short"}).format(new Date());var hour=new Date().getHours();el("greeting").textContent=hour<12?"Good morning.":hour<17?"Good afternoon.":"Good evening.";el("tasks").innerHTML=state.tasks.length?state.tasks.map(function(t){var subject=state.subjects.find(function(s){return s.id===t.subject_id});return '<div class="task '+(t.status==="done"?"done":"")+'"><button class="check" data-toggle="'+t.id+'" aria-label="Toggle task">'+(t.status==="done"?"✓":"")+'</button><div class="task-main"><div class="task-title">'+escapeHtml(t.title)+'</div><div class="task-meta">'+escapeHtml(subject?subject.name:"General")+' · '+(t.due_date?"Due "+escapeHtml(t.due_date):"No due date")+' · '+t.estimated_minutes+' min</div></div><span class="priority '+t.priority+'">'+t.priority+'</span><button class="btn ghost" data-delete="'+t.id+'" aria-label="Delete task">×</button></div>'}).join(""):'<div class="empty">No tasks yet. Add one small goal and get started.</div>';el("subjects").innerHTML=state.subjects.length?state.subjects.map(function(s){return '<div class="subject"><span><i class="dot" style="background:'+escapeHtml(s.color)+'"></i>'+escapeHtml(s.name)+'</span><span class="muted">›</span></div>'}).join(""):'<p class="muted" style="font-size:13px">Add subjects to organise your study plan.</p>';var opts='<option value="">General study</option>'+state.subjects.map(function(s){return '<option value="'+s.id+'">'+escapeHtml(s.name)+'</option>'}).join("");el("studySubject").innerHTML=opts;el("taskSubject").innerHTML='<option value="">No subject</option>'+state.subjects.map(function(s){return '<option value="'+s.id+'">'+escapeHtml(s.name)+'</option>'}).join("")}
-async function refresh(){var data=await api("/api/dashboard");state.tasks=data.tasks||[];state.subjects=data.subjects||[];state.today_minutes=data.today_minutes;state.completed=data.completed;state.settings=data.settings||state.settings;render()}
+function renderTasks(){
+  var search=(el("taskSearch").value||"").trim().toLowerCase();
+  var filter=el("taskFilter").value||"all";
+  var filtered=state.tasks.filter(function(t){
+    var subject=state.subjects.find(function(item){return item.id===t.subject_id});
+    var haystack=(t.title+" "+(t.description||"")+" "+(subject?subject.name:"")).toLowerCase();
+    if(search&&haystack.indexOf(search)===-1)return false;
+    if(filter==="open"&&t.status==="done")return false;
+    if(filter==="done"&&t.status!=="done")return false;
+    if(filter==="high"&&t.priority!=="high")return false;
+    return true;
+  });
+  el("tasks").innerHTML=filtered.length?filtered.map(function(t){
+    var subject=state.subjects.find(function(item){return item.id===t.subject_id});
+    return '<div class="task '+(t.status==="done"?"done":"")+'"><button class="check" data-toggle="'+t.id+'" aria-label="Toggle task">'+(t.status==="done"?"✓":"")+'</button><div class="task-main"><div class="task-title">'+escapeHtml(t.title)+'</div><div class="task-meta">'+escapeHtml(subject?subject.name:"General")+' · '+(t.due_date?"Due "+escapeHtml(t.due_date):"No due date")+' · '+t.estimated_minutes+' min</div></div><span class="priority '+t.priority+'">'+t.priority+'</span><button class="btn ghost" data-delete="'+t.id+'" aria-label="Delete task">×</button></div>';
+  }).join(""):'<div class="empty">'+(search||filter!=="all"?"No tasks match these filters.":"No tasks yet. Add one small goal and get started.")+'</div>';
+}
+function render(){
+  var done=state.tasks.filter(function(t){return t.status==="done"}).length;
+  var remaining=state.tasks.length-done;
+  var mins=Number(state.today_minutes)||0;
+  var goal=Number(state.settings.daily_goal_minutes)||360;
+  el("studyTime").textContent=mins>=60?Math.floor(mins/60)+"h "+mins%60+"m":mins+"m";
+  el("goalText").textContent=goal>=60?(goal/60).toFixed(goal%60?1:0)+"h":goal+"m";
+  el("goalBar").style.width=Math.min(100,mins/goal*100)+"%";
+  el("doneCount").textContent=state.completed||done;
+  el("remainingCount").textContent=remaining;
+  el("streakCount").textContent=(state.streak_days||0)+"d";
+  el("dailyGoal").value=goal;
+  el("userName").textContent=state.user.display_name;
+  el("today").textContent=new Intl.DateTimeFormat("en-IN",{weekday:"short",day:"numeric",month:"short"}).format(new Date());
+  var hour=new Date().getHours();
+  el("greeting").textContent=hour<12?"Good morning.":hour<17?"Good afternoon.":"Good evening.";
+  renderTasks();
+  el("subjects").innerHTML=state.subjects.length?state.subjects.map(function(subject){return '<div class="subject"><span><i class="dot" style="background:'+escapeHtml(subject.color)+'"></i>'+escapeHtml(subject.name)+'</span><span class="muted">›</span></div>'}).join(""):'<p class="muted" style="font-size:13px">Add subjects to organise your study plan.</p>';
+  var opts='<option value="">General study</option>'+state.subjects.map(function(subject){return '<option value="'+subject.id+'">'+escapeHtml(subject.name)+'</option>'}).join("");
+  el("studySubject").innerHTML=opts;
+  var previousFocusSubject=el("focusSubject").value;
+  el("focusSubject").innerHTML=opts;
+  if(state.subjects.some(function(subject){return subject.id===previousFocusSubject}))el("focusSubject").value=previousFocusSubject;
+  el("taskSubject").innerHTML='<option value="">No subject</option>'+state.subjects.map(function(subject){return '<option value="'+subject.id+'">'+escapeHtml(subject.name)+'</option>'}).join("");
+  var weekly=state.weekly_minutes||[];
+  var maxMinutes=Math.max(60,...weekly.map(function(day){return Number(day.minutes)||0}));
+  var total=weekly.reduce(function(sum,day){return sum+(Number(day.minutes)||0)},0);
+  el("weekBars").innerHTML=weekly.map(function(day){
+    var date=new Date(day.date+"T12:00:00");
+    var label=new Intl.DateTimeFormat("en-IN",{weekday:"short"}).format(date);
+    var minutes=Number(day.minutes)||0;
+    var height=minutes?Math.max(5,minutes/maxMinutes*78):3;
+    var value=minutes>=60?(minutes/60).toFixed(1)+"h":minutes+"m";
+    return '<div class="week-col" title="'+day.date+": "+minutes+' minutes"><span class="week-value">'+(minutes?value:"")+'</span><div class="week-track"><i class="week-fill" style="height:'+height+'px"></i></div><span class="week-day">'+label+'</span></div>';
+  }).join("");
+  el("weekTotal").textContent=total>=60?(total/60).toFixed(1)+"h":total+"m";
+  var average=Math.round(total/7);
+  el("weekAverage").textContent=average>=60?(average/60).toFixed(1)+"h":average+"m";
+  var allTime=Number(state.all_time_minutes)||0;
+  el("allTimeStudy").textContent=allTime>=60?(allTime/60).toFixed(1)+"h":allTime+"m";
+  updateTimerUI();
+}
+async function refresh(){var data=await api("/api/dashboard");state.tasks=data.tasks||[];state.subjects=data.subjects||[];state.today_minutes=data.today_minutes;state.completed=data.completed;state.settings=data.settings||state.settings;state.weekly_minutes=data.weekly_minutes||[];state.streak_days=data.streak_days||0;state.all_time_minutes=data.all_time_minutes||0;render()}
 async function startApp(user){state.user=user;el("auth").classList.add("hidden");el("app").classList.remove("hidden");await refresh()}
 el("toggleAuth").onclick=function(){authMode(el("auth").dataset.signup!=="1")};
 el("authForm").onsubmit=async function(e){e.preventDefault();var signup=el("auth").dataset.signup==="1";el("authError").textContent="";try{var data=await api(signup?"/api/auth/register":"/api/auth/login",{method:"POST",body:JSON.stringify({name:el("name").value,email:el("email").value,password:el("password").value})});await startApp(data.user)}catch(err){el("authError").textContent=err.message}};
@@ -266,6 +422,55 @@ el("tasks").onclick=async function(e){var toggle=e.target.closest("[data-toggle]
 el("studyForm").onsubmit=async function(e){e.preventDefault();try{await api("/api/study-sessions",{method:"POST",body:JSON.stringify({title:el("studyTitle").value||"Study session",subject_id:el("studySubject").value,duration_minutes:el("studyMinutes").value})});el("studyTitle").value="";await refresh();showToast("Study session saved. Keep it up!") }catch(err){showToast(err.message)}};
 el("saveGoal").onclick=async function(){try{await api("/api/settings",{method:"PATCH",body:JSON.stringify({daily_goal_minutes:el("dailyGoal").value})});await refresh();showToast("Daily target updated.")}catch(err){showToast(err.message)}};
 el("passwordForm").onsubmit=async function(e){e.preventDefault();try{await api("/api/auth/password",{method:"POST",body:JSON.stringify({current_password:el("currentPassword").value,new_password:el("newPassword").value})});el("passwordForm").reset();showToast("Password changed. Other sessions were signed out.")}catch(err){showToast(err.message)}};
+function formatTimer(seconds){var safe=Math.max(0,seconds);return String(Math.floor(safe/60)).padStart(2,"0")+":"+String(safe%60).padStart(2,"0")}
+function updateTimerUI(){
+  var progress=timer.duration?1-timer.remaining/timer.duration:0;
+  el("timerReadout").textContent=formatTimer(timer.remaining);
+  el("timerProgress").style.strokeDashoffset=String(314.16*(1-progress));
+  el("timerStart").textContent=timer.running?"Pause":timer.remaining===0?"Start again":"Start";
+  el("timerStatus").textContent=timer.running?"Stay with this session":timer.mode==="break"?"Take a breather":timer.remaining===0?"Block complete":"Ready to focus";
+  document.querySelectorAll("[data-mode]").forEach(function(button){button.setAttribute("aria-pressed",button.dataset.mode===timer.mode?"true":"false")});
+  document.title=(timer.running?formatTimer(timer.remaining)+" · ":"")+"JEE360 — Your preparation, in focus";
+}
+function stopTimerInterval(){if(timer.handle){clearInterval(timer.handle);timer.handle=null}}
+function pauseTimer(){if(timer.running){timer.remaining=Math.max(0,Math.ceil((timer.deadline-Date.now())/1000));timer.running=false;stopTimerInterval();updateTimerUI()}}
+function setTimerMode(mode){
+  pauseTimer();
+  timer.mode=mode==="break"?"break":"focus";
+  timer.duration=timer.mode==="focus"?1500:300;
+  timer.remaining=timer.duration;
+  timer.deadline=0;
+  updateTimerUI();
+}
+async function finishTimer(){
+  timer.running=false;timer.remaining=0;stopTimerInterval();updateTimerUI();
+  if(timer.mode==="focus"){
+    try{
+      await api("/api/study-sessions",{method:"POST",body:JSON.stringify({title:"Focus session · 25 minutes",subject_id:el("focusSubject").value||null,duration_minutes:25})});
+      await refresh();
+      showToast("Focus block saved to your study log. Great work!");
+    }catch(error){showToast("Timer finished, but saving failed: "+error.message)}
+  }else{showToast("Break complete. Ready for another focus block?")}
+  updateTimerUI();
+}
+function tickTimer(){
+  if(!timer.running)return;
+  timer.remaining=Math.max(0,Math.ceil((timer.deadline-Date.now())/1000));
+  if(timer.remaining===0){finishTimer();return}
+  updateTimerUI();
+}
+el("timerStart").onclick=function(){
+  if(timer.running){pauseTimer();return}
+  if(timer.remaining<=0)timer.remaining=timer.duration;
+  timer.running=true;timer.deadline=Date.now()+timer.remaining*1000;
+  stopTimerInterval();timer.handle=setInterval(tickTimer,250);updateTimerUI();
+};
+el("timerReset").onclick=function(){pauseTimer();timer.remaining=timer.duration;timer.deadline=0;updateTimerUI()};
+document.querySelectorAll("[data-mode]").forEach(function(button){button.addEventListener("click",function(){setTimerMode(button.dataset.mode)})});
+document.addEventListener("visibilitychange",function(){if(!document.hidden)tickTimer()});
+el("taskSearch").addEventListener("input",renderTasks);
+el("taskFilter").addEventListener("change",renderTasks);
+updateTimerUI();
 api("/api/auth/me").then(function(data){if(data.user)startApp(data.user)}).catch(function(){});
 </script></body></html>`;
 
