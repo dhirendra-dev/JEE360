@@ -10,6 +10,8 @@ JEE360 is deployed as an independent Cloudflare Worker with a dedicated D1 datab
 - Opaque, hashed, HttpOnly, Secure, SameSite=Lax session cookies (30-day expiry)
 - Per-account task and subject records
 - Study-session logging and daily study goal
+- Responsive cream-and-blue light theme and balanced dark theme
+- System theme detection, manual theme toggle, and saved theme preference
 - Server-side ownership checks for every private record
 - Same-origin mutation checks and input validation
 - Per-IP authentication attempt throttling and constant-time password-hash comparison
