@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS users (
   password_salt TEXT NOT NULL,
   password_hash TEXT NOT NULL,
   password_iterations INTEGER NOT NULL DEFAULT 310000,
+  password_hash_scheme TEXT NOT NULL DEFAULT 'pbkdf2-server',
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );

@@ -48,3 +48,16 @@ test("D1 foreign keys rely on the platform's enforced default", async () => {
   assert.doesNotMatch(migration, /PRAGMA foreign_keys/i);
   assert.match(schema, /REFERENCES users\(id\) ON DELETE CASCADE/);
 });
+
+test("new authentication derives PBKDF2 verifiers in the browser", () => {
+  assert.match(worker, /async function derivePasswordVerifier/);
+  assert.match(worker, /crypto\.subtle\.deriveBits/);
+  assert.match(worker, /password_verifier/);
+  assert.match(worker, /pbkdf2-client-sha256/);
+  assert.match(schema, /password_hash_scheme TEXT NOT NULL/);
+});
+
+test("registration stores a one-way digest of the client-derived verifier", () => {
+  assert.match(worker, /const hash = await digest\(data\.password_verifier\)/);
+  assert.doesNotMatch(worker, /const hash = await passwordHash\(data\.password, salt, ITERATIONS\)/);
+});

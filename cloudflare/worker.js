@@ -29,6 +29,7 @@ function getCookie(request) {
   return part ? part.slice(COOKIE.length + 1) : "";
 }
 function validEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254; }
+function validHex(value, length) { return typeof value === "string" && value.length === length && /^[0-9a-f]+$/i.test(value); }
 function validDate(value) {
   if (value == null || value === "") return true;
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -102,23 +103,32 @@ async function handleApi(request, env, path) {
     ]);
     return json({ ok: true, service: "JEE360", database: "connected", schema_version: 1 });
   }
+  if (path === "/api/auth/challenge" && method === "POST") {
+    const data = await body(request);
+    if (!data || typeof data.email !== "string") return json({ error: "Enter your email address." }, 400);
+    const email = data.email.trim().toLowerCase();
+    if (!validEmail(email)) return json({ error: "Enter a valid email address." }, 400);
+    if (await rateLimited(request, env, "login-challenge", 20, 900)) return json({ error: "Too many sign-in attempts. Please wait 15 minutes." }, 429);
+    const row = await env.DB.prepare("SELECT password_salt,password_iterations,password_hash_scheme FROM users WHERE email=?").bind(email).first();
+    return json({ salt: row ? row.password_salt : randomHex(16), iterations: row ? Number(row.password_iterations) : ITERATIONS, scheme: row && row.password_hash_scheme ? row.password_hash_scheme : (row ? "pbkdf2-server" : "pbkdf2-client-sha256") });
+  }
   if (path === "/api/auth/register" && method === "POST") {
     const data = await body(request);
-    if (!data || typeof data.email !== "string" || typeof data.password !== "string" || typeof data.name !== "string") return json({ error: "Please provide your name, email and password." }, 400);
+    if (!data || typeof data.email !== "string" || typeof data.password_verifier !== "string" || typeof data.salt !== "string" || typeof data.name !== "string") return json({ error: "Please provide your name, email and password." }, 400);
     const email = data.email.trim().toLowerCase();
     const name = data.name.trim().slice(0, 60);
     if (!name || !validEmail(email)) return json({ error: "Enter a valid name and email address." }, 400);
-    if (data.password.length < 10 || data.password.length > 128) return json({ error: "Use a password between 10 and 128 characters." }, 400);
+    if (!validHex(data.salt, 32) || !validHex(data.password_verifier, 64)) return json({ error: "Your password could not be verified. Please try again." }, 400);
     if (await rateLimited(request, env, "register", 12, 900)) return json({ error: "Too many sign-up attempts from this connection. Please wait 15 minutes, then try again." }, 429);
     const id = crypto.randomUUID();
     const salt = randomHex(16);
-    const hash = await passwordHash(data.password, salt, ITERATIONS);
+    const hash = await digest(data.password_verifier);
     const token = randomHex(32);
     const tokenHash = await digest(token);
     const expires = new Date(Date.now() + SESSION_DAYS * 86400000).toISOString();
     try {
       await env.DB.batch([
-        env.DB.prepare("INSERT INTO users (id,email,display_name,password_salt,password_hash,password_iterations) VALUES (?,?,?,?,?,?)").bind(id, email, name, salt, hash, ITERATIONS),
+        env.DB.prepare("INSERT INTO users (id,email,display_name,password_salt,password_hash,password_iterations,password_hash_scheme) VALUES (?,?,?,?,?,?,?)").bind(id, email, name, data.salt, hash, ITERATIONS, "pbkdf2-client-sha256"),
         env.DB.prepare("INSERT INTO user_settings (user_id) VALUES (?)").bind(id),
         env.DB.prepare("INSERT INTO sessions (id,user_id,token_hash,expires_at) VALUES (?,?,?,?)").bind(crypto.randomUUID(), id, tokenHash, expires)
       ]);
@@ -135,11 +145,17 @@ async function handleApi(request, env, path) {
     if (!data || typeof data.email !== "string" || typeof data.password !== "string") return json({ error: "Enter your email and password." }, 400);
     const email = data.email.trim().toLowerCase();
     if (await rateLimited(request, env, "login", 12, 900)) return json({ error: "Too many sign-in attempts. Please wait 15 minutes." }, 429);
-    const row = await env.DB.prepare("SELECT id,email,display_name,password_salt,password_hash,password_iterations FROM users WHERE email=?").bind(email).first();
-    const salt = row ? row.password_salt : "jee360-invalid-user-salt";
-    const expected = row ? row.password_hash : "not-a-valid-password-hash";
-    const actual = await passwordHash(data.password.slice(0, 128), salt, row ? Number(row.password_iterations) : ITERATIONS);
-    if (!row || !constantTimeEqual(actual, expected)) return json({ error: "Email or password is incorrect." }, 401);
+    const row = await env.DB.prepare("SELECT id,email,display_name,password_salt,password_hash,password_iterations,password_hash_scheme FROM users WHERE email=?").bind(email).first();
+    let actual;
+    if (row && row.password_hash_scheme === "pbkdf2-client-sha256") {
+      if (!validHex(data.password_verifier, 64)) return json({ error: "Email or password is incorrect." }, 401);
+      actual = await digest(data.password_verifier);
+    } else {
+      if (typeof data.password !== "string") return json({ error: "Email or password is incorrect." }, 401);
+      const salt = row ? row.password_salt : "jee360-invalid-user-salt";
+      actual = await passwordHash(data.password.slice(0, 128), salt, row ? Number(row.password_iterations) : ITERATIONS);
+    }
+    if (!row || !constantTimeEqual(actual, row.password_hash)) return json({ error: "Email or password is incorrect." }, 401);
     const token = await createSession(row.id, env);
     return json({ user: { id: row.id, email: row.email, display_name: row.display_name } }, 200, { "set-cookie": cookie(token, SESSION_DAYS * 86400) });
   }
@@ -157,22 +173,34 @@ async function handleApi(request, env, path) {
   if (!auth.user) return auth.error;
   const userId = auth.user.id;
 
+  if (path === "/api/auth/password/challenge" && method === "GET") {
+    const account = await env.DB.prepare("SELECT password_salt,password_iterations,password_hash_scheme FROM users WHERE id=?").bind(userId).first();
+    if (!account) return json({ error: "Account not found." }, 404);
+    return json({ salt: account.password_salt, iterations: Number(account.password_iterations), scheme: account.password_hash_scheme || "pbkdf2-server" });
+  }
   if (path === "/api/auth/password" && method === "POST") {
     const data = await body(request);
-    if (!data || typeof data.current_password !== "string" || typeof data.new_password !== "string") return json({ error: "Enter your current and new passwords." }, 400);
-    if (data.new_password.length < 10 || data.new_password.length > 128) return json({ error: "Use a new password between 10 and 128 characters." }, 400);
+    if (!data || typeof data.new_salt !== "string" || typeof data.new_verifier !== "string") return json({ error: "Enter your current and new passwords." }, 400);
+    if (!validHex(data.new_salt, 32) || !validHex(data.new_verifier, 64)) return json({ error: "Your new password could not be verified." }, 400);
     if (await rateLimited(request, env, "password-change", 5, 3600)) return json({ error: "Too many password-change attempts. Try again later." }, 429);
-    const account = await env.DB.prepare("SELECT password_salt,password_hash,password_iterations FROM users WHERE id=?").bind(userId).first();
+    const account = await env.DB.prepare("SELECT password_salt,password_hash,password_iterations,password_hash_scheme FROM users WHERE id=?").bind(userId).first();
     if (!account) return json({ error: "Account not found." }, 404);
-    const currentHash = await passwordHash(data.current_password.slice(0, 128), account.password_salt, Number(account.password_iterations));
+    let currentHash;
+    if (account.password_hash_scheme === "pbkdf2-client-sha256") {
+      if (!validHex(data.current_verifier, 64)) return json({ error: "Your current password is incorrect." }, 401);
+      currentHash = await digest(data.current_verifier);
+    } else {
+      if (typeof data.current_password !== "string") return json({ error: "Your current password is incorrect." }, 401);
+      currentHash = await passwordHash(data.current_password.slice(0, 128), account.password_salt, Number(account.password_iterations));
+    }
     if (!constantTimeEqual(currentHash, account.password_hash)) return json({ error: "Your current password is incorrect." }, 401);
-    const salt = randomHex(16);
-    const hash = await passwordHash(data.new_password, salt, ITERATIONS);
+    const salt = data.new_salt;
+    const hash = await digest(data.new_verifier);
     const token = randomHex(32);
     const tokenHash = await digest(token);
     const expires = new Date(Date.now() + SESSION_DAYS * 86400000).toISOString();
     await env.DB.batch([
-      env.DB.prepare("UPDATE users SET password_salt=?,password_hash=?,password_iterations=?,updated_at=datetime('now') WHERE id=?").bind(salt, hash, ITERATIONS, userId),
+      env.DB.prepare("UPDATE users SET password_salt=?,password_hash=?,password_iterations=?,password_hash_scheme=?,updated_at=datetime('now') WHERE id=?").bind(salt, hash, ITERATIONS, "pbkdf2-client-sha256", userId),
       env.DB.prepare("INSERT INTO sessions (id,user_id,token_hash,expires_at) VALUES (?,?,?,?)").bind(crypto.randomUUID(), userId, tokenHash, expires),
       env.DB.prepare("DELETE FROM sessions WHERE user_id=? AND token_hash<>?").bind(userId, tokenHash)
     ]);
@@ -410,6 +438,16 @@ function initTheme(){var saved=null;try{saved=localStorage.getItem("jee360-theme
 initTheme();
 
 function showToast(message){el("toast").textContent=message;el("toast").classList.remove("hidden");setTimeout(function(){el("toast").classList.add("hidden")},2400)}
+async function derivePasswordVerifier(password,saltHex,iterations){
+  var salt=new Uint8Array(saltHex.match(/.{2}/g).map(function(x){return parseInt(x,16)}));
+  var key=await crypto.subtle.importKey("raw",new TextEncoder().encode(password),"PBKDF2",false,["deriveBits"]);
+  var bits=await crypto.subtle.deriveBits({name:"PBKDF2",salt:salt,iterations:iterations,hash:"SHA-256"},key,256);
+  return Array.from(new Uint8Array(bits)).map(function(x){return x.toString(16).padStart(2,"0")}).join("");
+}
+function randomSaltHex(){
+  var bytes=crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes).map(function(x){return x.toString(16).padStart(2,"0")}).join("");
+}
 async function api(path,options){
   options=options||{};
   options.headers=Object.assign({"content-type":"application/json"},options.headers||{});
@@ -519,7 +557,24 @@ el("authForm").onsubmit=async function(e){
   submit.disabled=true;
   submit.textContent=signup?"Creating account…":"Signing in…";
   try{
-    var data=await api(signup?"/api/auth/register":"/api/auth/login",{method:"POST",body:JSON.stringify({name:el("name").value.trim(),email:el("email").value.trim(),password:el("password").value})});
+    var email=el("email").value.trim();
+    var password=el("password").value;
+    var payload;
+    if(signup){
+      if(password.length<10||password.length>128)throw new Error("Use a password between 10 and 128 characters.");
+      var salt=randomSaltHex();
+      var verifier=await derivePasswordVerifier(password,salt,310000);
+      payload={name:el("name").value.trim(),email:email,salt:salt,password_verifier:verifier};
+    }else{
+      var challenge=await api("/api/auth/challenge",{method:"POST",body:JSON.stringify({email:email})});
+      if(challenge.scheme==="pbkdf2-client-sha256"){
+        var verifier=await derivePasswordVerifier(password,challenge.salt,challenge.iterations);
+        payload={email:email,password_verifier:verifier};
+      }else{
+        payload={email:email,password:password};
+      }
+    }
+    var data=await api(signup?"/api/auth/register":"/api/auth/login",{method:"POST",body:JSON.stringify(payload)});
     if(!data.user)throw new Error("The server did not confirm your account. Please try again.");
     await startApp(data.user);
   }catch(err){
@@ -539,7 +594,21 @@ el("subjectForm").onsubmit=async function(e){e.preventDefault();try{await api("/
 el("tasks").onclick=async function(e){var toggle=e.target.closest("[data-toggle]");var del=e.target.closest("[data-delete]");try{if(toggle){var task=state.tasks.find(function(t){return t.id===toggle.dataset.toggle});await api("/api/tasks/"+task.id,{method:"PATCH",body:JSON.stringify({status:task.status==="done"?"todo":"done"})});await refresh()}if(del){await api("/api/tasks/"+del.dataset.delete,{method:"DELETE"});await refresh();showToast("Task deleted.")}}catch(err){showToast(err.message)}};
 el("studyForm").onsubmit=async function(e){e.preventDefault();try{await api("/api/study-sessions",{method:"POST",body:JSON.stringify({title:el("studyTitle").value||"Study session",subject_id:el("studySubject").value,duration_minutes:el("studyMinutes").value})});el("studyTitle").value="";await refresh();showToast("Study session saved. Keep it up!") }catch(err){showToast(err.message)}};
 el("saveGoal").onclick=async function(){try{await api("/api/settings",{method:"PATCH",body:JSON.stringify({daily_goal_minutes:el("dailyGoal").value})});await refresh();showToast("Daily target updated.")}catch(err){showToast(err.message)}};
-el("passwordForm").onsubmit=async function(e){e.preventDefault();try{await api("/api/auth/password",{method:"POST",body:JSON.stringify({current_password:el("currentPassword").value,new_password:el("newPassword").value})});el("passwordForm").reset();showToast("Password changed. Other sessions were signed out.")}catch(err){showToast(err.message)}};
+el("passwordForm").onsubmit=async function(e){
+  e.preventDefault();
+  try{
+    var challenge=await api("/api/auth/password/challenge");
+    var currentPassword=el("currentPassword").value;
+    var currentVerifier=null;
+    if(challenge.scheme==="pbkdf2-client-sha256")currentVerifier=await derivePasswordVerifier(currentPassword,challenge.salt,challenge.iterations);
+    var newPassword=el("newPassword").value;
+    if(newPassword.length<10||newPassword.length>128)throw new Error("Use a new password between 10 and 128 characters.");
+    var newSalt=randomSaltHex();
+    var newVerifier=await derivePasswordVerifier(newPassword,newSalt,310000);
+    await api("/api/auth/password",{method:"POST",body:JSON.stringify({current_verifier:currentVerifier,current_password:challenge.scheme==="pbkdf2-client-sha256"?undefined:currentPassword,new_salt:newSalt,new_verifier:newVerifier})});
+    el("passwordForm").reset();showToast("Password changed. Other sessions were signed out.");
+  }catch(err){showToast(err.message)}
+};
 function formatTimer(seconds){var safe=Math.max(0,seconds);return String(Math.floor(safe/60)).padStart(2,"0")+":"+String(safe%60).padStart(2,"0")}
 function updateTimerUI(){
   var progress=timer.duration?1-timer.remaining/timer.duration:0;
