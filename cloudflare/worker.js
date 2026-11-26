@@ -183,17 +183,24 @@ async function handleApi(request, env, path) {
     if (!data || typeof data.new_salt !== "string" || typeof data.new_verifier !== "string") return json({ error: "Enter your current and new passwords." }, 400);
     if (!validHex(data.new_salt, 32) || !validHex(data.new_verifier, 64)) return json({ error: "Your new password could not be verified." }, 400);
     if (await rateLimited(request, env, "password-change", 5, 3600)) return json({ error: "Too many password-change attempts. Try again later." }, 429);
-    const account = await env.DB.prepare("SELECT password_salt,password_hash,password_iterations FROM users WHERE id=?").bind(userId).first();
+    const account = await env.DB.prepare("SELECT password_salt,password_hash,password_iterations,password_hash_scheme FROM users WHERE id=?").bind(userId).first();
     if (!account) return json({ error: "Account not found." }, 404);
-    const currentHash = await passwordHash(data.current_password.slice(0, 128), account.password_salt, Number(account.password_iterations));
+    let currentHash;
+    if (account.password_hash_scheme === "pbkdf2-client-sha256") {
+      if (!validHex(data.current_verifier, 64)) return json({ error: "Your current password is incorrect." }, 401);
+      currentHash = await digest(data.current_verifier);
+    } else {
+      if (typeof data.current_password !== "string") return json({ error: "Your current password is incorrect." }, 401);
+      currentHash = await passwordHash(data.current_password.slice(0, 128), account.password_salt, Number(account.password_iterations));
+    }
     if (!constantTimeEqual(currentHash, account.password_hash)) return json({ error: "Your current password is incorrect." }, 401);
-    const salt = randomHex(16);
-    const hash = await passwordHash(data.new_password, salt, ITERATIONS);
+    const salt = data.new_salt;
+    const hash = await digest(data.new_verifier);
     const token = randomHex(32);
     const tokenHash = await digest(token);
     const expires = new Date(Date.now() + SESSION_DAYS * 86400000).toISOString();
     await env.DB.batch([
-      env.DB.prepare("UPDATE users SET password_salt=?,password_hash=?,password_iterations=?,updated_at=datetime('now') WHERE id=?").bind(salt, hash, ITERATIONS, userId),
+      env.DB.prepare("UPDATE users SET password_salt=?,password_hash=?,password_iterations=?,password_hash_scheme=?,updated_at=datetime('now') WHERE id=?").bind(salt, hash, ITERATIONS, "pbkdf2-client-sha256", userId),
       env.DB.prepare("INSERT INTO sessions (id,user_id,token_hash,expires_at) VALUES (?,?,?,?)").bind(crypto.randomUUID(), userId, tokenHash, expires),
       env.DB.prepare("DELETE FROM sessions WHERE user_id=? AND token_hash<>?").bind(userId, tokenHash)
     ]);
