@@ -86,22 +86,32 @@ async function handleApi(request, env, path) {
     const name = data.name.trim().slice(0, 60);
     if (!name || !validEmail(email)) return json({ error: "Enter a valid name and email address." }, 400);
     if (data.password.length < 10 || data.password.length > 128) return json({ error: "Use a password between 10 and 128 characters." }, 400);
-    if (await rateLimited(request, env, "register", 5, 3600)) return json({ error: "Too many sign-up attempts. Please try again later." }, 429);
+    if (await rateLimited(request, env, "register", 12, 900)) return json({ error: "Too many sign-up attempts from this connection. Please wait 15 minutes, then try again." }, 429);
     const id = crypto.randomUUID();
     const salt = randomHex(16);
     const hash = await passwordHash(data.password, salt, ITERATIONS);
+    const token = randomHex(32);
+    const tokenHash = await digest(token);
+    const expires = new Date(Date.now() + SESSION_DAYS * 86400000).toISOString();
     try {
-      await env.DB.prepare("INSERT INTO users (id,email,display_name,password_salt,password_hash,password_iterations) VALUES (?,?,?,?,?,?)").bind(id, email, name, salt, hash, ITERATIONS).run();
-    } catch (_) { return json({ error: "An account with this email may already exist." }, 409); }
-    await env.DB.prepare("INSERT INTO user_settings (user_id) VALUES (?)").bind(id).run();
-    const token = await createSession(id, env);
+      await env.DB.batch([
+        env.DB.prepare("INSERT INTO users (id,email,display_name,password_salt,password_hash,password_iterations) VALUES (?,?,?,?,?,?)").bind(id, email, name, salt, hash, ITERATIONS),
+        env.DB.prepare("INSERT INTO user_settings (user_id) VALUES (?)").bind(id),
+        env.DB.prepare("INSERT INTO sessions (id,user_id,token_hash,expires_at) VALUES (?,?,?,?)").bind(crypto.randomUUID(), id, tokenHash, expires)
+      ]);
+    } catch (error) {
+      const message = String(error && error.message || "");
+      if (/unique constraint|already exists/i.test(message)) return json({ error: "An account with this email already exists. Please sign in instead." }, 409);
+      console.error("JEE360 registration transaction failed", error);
+      return json({ error: "We couldn't finish creating your account. Please try again in a moment." }, 500);
+    }
     return json({ user: { id: id, email: email, display_name: name } }, 201, { "set-cookie": cookie(token, SESSION_DAYS * 86400) });
   }
   if (path === "/api/auth/login" && method === "POST") {
     const data = await body(request);
     if (!data || typeof data.email !== "string" || typeof data.password !== "string") return json({ error: "Enter your email and password." }, 400);
     const email = data.email.trim().toLowerCase();
-    if (await rateLimited(request, env, "login", 10, 900)) return json({ error: "Too many sign-in attempts. Please wait 15 minutes." }, 429);
+    if (await rateLimited(request, env, "login", 12, 900)) return json({ error: "Too many sign-in attempts. Please wait 15 minutes." }, 429);
     const row = await env.DB.prepare("SELECT id,email,display_name,password_salt,password_hash,password_iterations FROM users WHERE email=?").bind(email).first();
     const salt = row ? row.password_salt : "jee360-invalid-user-salt";
     const expected = row ? row.password_hash : "not-a-valid-password-hash";
@@ -263,7 +273,7 @@ const PAGE = String.raw`<!doctype html>
 .hero{display:flex;justify-content:space-between;align-items:end;gap:18px;margin:29px 0 20px}.eyebrow{color:var(--blue);font-size:10px;font-weight:750;letter-spacing:1.55px;text-transform:uppercase}.hero h2{font-size:clamp(26px,4vw,34px);letter-spacing:-1.1px;line-height:1.16;margin:7px 0 5px;font-weight:720}.hero p{margin:0;color:var(--muted);font-size:14px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:var(--shadow)}.stat-label{font-size:12px;color:var(--muted);font-weight:550}.stat{font-size:28px;font-weight:750;letter-spacing:-.8px;margin:8px 0 1px;color:var(--text)}.stat-sub{font-size:11px;color:var(--muted)}
 .layout{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(270px,.8fr);gap:14px;margin-top:14px}.section-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:14px}.section-head h3{margin:0;font-size:15px;font-weight:700;letter-spacing:-.2px}.task-list{display:grid;gap:8px}.task{display:flex;align-items:center;gap:11px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-soft)}.check{width:20px;height:20px;border:1.5px solid var(--line-strong);border-radius:6px;background:var(--surface);flex:none;color:white}.task-main{min-width:0;flex:1}.task-title{font-weight:620;overflow-wrap:anywhere;font-size:13px}.task.done .task-title{text-decoration:line-through;color:var(--muted)}.task-meta{font-size:11px;color:var(--muted);margin-top:3px}.priority{font-size:10px;border-radius:6px;padding:4px 7px;background:var(--surface-blue);color:var(--blue-strong);font-weight:650}.priority.high{background:#f7e9eb;color:#a64e5a}.priority.low{background:#e8f2ed;color:#397e68}.progress{height:6px;background:var(--surface-blue);border-radius:99px;overflow:hidden;margin:12px 0}.progress span{display:block;height:100%;background:var(--blue);border-radius:99px;transition:width .25s}
 .formrow{display:flex;gap:8px}.field{width:100%;border:1px solid var(--line-strong);background:var(--surface);color:var(--text);border-radius:9px;padding:10px 11px;outline:none;transition:border-color .15s,box-shadow .15s}.field:focus{border-color:var(--blue);box-shadow:0 0 0 3px var(--focus)}.field::placeholder{color:var(--muted)}label{display:block;font-size:12px;color:var(--muted);font-weight:600;margin:12px 0 6px}.stack{display:grid;gap:10px}.subject{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--line);font-size:13px}.dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:9px}
-.modal{position:fixed;inset:0;background:rgba(18,28,43,.48);display:grid;place-items:center;padding:16px;z-index:5;backdrop-filter:blur(3px)}.modalbox{width:min(440px,100%);background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:23px;box-shadow:0 22px 70px rgba(20,35,55,.2)}.modalbox h2{margin:0 0 4px}.authwrap{min-height:100vh;display:grid;place-items:center;padding:24px;background:var(--bg)}.authcard{width:min(430px,100%);padding:30px}.authcard h2{font-size:27px;letter-spacing:-.8px;margin:0 0 4px}.authbrand{display:flex;justify-content:space-between;align-items:center;margin-bottom:28px}.notice{font-size:12px;color:var(--muted);margin-top:15px}.empty{padding:24px;text-align:center;color:var(--muted);border:1px dashed var(--line-strong);border-radius:10px;background:var(--surface-soft)}.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);padding:10px 15px;border-radius:9px;background:var(--text);color:var(--bg);font-weight:650;font-size:13px;z-index:10;box-shadow:var(--shadow)}.foot{padding:22px 0;color:var(--muted);text-align:center;font-size:11px}
+.modal{position:fixed;inset:0;background:rgba(18,28,43,.48);display:grid;place-items:center;padding:16px;z-index:5;backdrop-filter:blur(3px)}.modalbox{width:min(440px,100%);background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:23px;box-shadow:0 22px 70px rgba(20,35,55,.2)}.modalbox h2{margin:0 0 4px}.authwrap{min-height:100vh;display:grid;place-items:center;padding:24px;background:var(--bg)}.authcard{width:min(430px,100%);padding:30px}.authcard h2{font-size:27px;letter-spacing:-.8px;margin:0 0 4px}.authbrand{display:flex;justify-content:space-between;align-items:center;margin-bottom:28px}.notice{font-size:12px;color:var(--muted);margin-top:15px}.error-text{color:var(--red);font-weight:650}.btn:disabled{opacity:.65;cursor:wait;transform:none}.empty{padding:24px;text-align:center;color:var(--muted);border:1px dashed var(--line-strong);border-radius:10px;background:var(--surface-soft)}.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);padding:10px 15px;border-radius:9px;background:var(--text);color:var(--bg);font-weight:650;font-size:13px;z-index:10;box-shadow:var(--shadow)}.foot{padding:22px 0;color:var(--muted);text-align:center;font-size:11px}
 @media(max-width:850px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.layout{grid-template-columns:1fr}.hero{align-items:start;flex-direction:column}.app{padding:20px}}@media(max-width:520px){.app{padding:15px 13px 26px}.top{align-items:flex-start}.topright{gap:6px;flex-wrap:wrap;justify-content:flex-end}.topright .pill{display:none}.theme-toggle{padding:7px 9px}.theme-toggle .theme-label{display:none}.grid{gap:8px}.card{padding:14px;border-radius:12px}.stat{font-size:24px}.formrow{flex-wrap:wrap}.hero h2{font-size:27px}.task{gap:8px;padding:10px}.priority{display:none}.authcard{padding:22px}.authbrand{margin-bottom:22px}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;scroll-behavior:auto!important}}
 
 .grid{grid-template-columns:repeat(5,minmax(0,1fr))}
@@ -346,11 +356,37 @@ function initTheme(){var saved=null;try{saved=localStorage.getItem("jee360-theme
 initTheme();
 
 function showToast(message){el("toast").textContent=message;el("toast").classList.remove("hidden");setTimeout(function(){el("toast").classList.add("hidden")},2400)}
-async function api(path,options){options=options||{};options.headers=Object.assign({"content-type":"application/json"},options.headers||{});var res=await fetch(path,options);var data=await res.json().catch(function(){return {}});if(!res.ok)throw new Error(data.error||"Something went wrong.");return data}
+async function api(path,options){
+  options=options||{};
+  options.headers=Object.assign({"content-type":"application/json"},options.headers||{});
+  options.credentials="same-origin";
+  options.cache="no-store";
+  var res;
+  try{res=await fetch(path,options)}catch(networkError){throw new Error("Network connection failed. Check your internet and try again.")}
+  var data=await res.json().catch(function(){return {}});
+  if(!res.ok){
+    if(res.status===429)throw new Error(data.error||"Too many attempts. Please wait a little and try again.");
+    if(res.status===409)throw new Error(data.error||"This email already has an account. Switch to sign in.");
+    throw new Error(data.error||("Request failed ("+res.status+"). Please try again."));
+  }
+  return data;
+}
 function escapeHtml(s){return String(s||"").replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]})}
 function openModal(id){el(id).classList.remove("hidden")}
 function closeModal(id){el(id).classList.add("hidden")}
-function authMode(signup){el("authTitle").textContent=signup?"Create your account.":"Welcome back.";el("authSub").textContent=signup?"Your personal study space is one step away.":"Sign in to continue your preparation.";el("nameField").classList.toggle("hidden",!signup);el("authSubmit").textContent=signup?"Create account":"Sign in";el("toggleAuth").textContent=signup?"I already have an account":"Create account";el("password").autocomplete=signup?"new-password":"current-password";el("auth").dataset.signup=signup?"1":"0";el("authError").textContent=""}
+function authMode(signup){
+  el("authTitle").textContent=signup?"Create your account.":"Welcome back.";
+  el("authSub").textContent=signup?"Create a private space for your study plan.":"Sign in to continue your preparation.";
+  el("nameField").classList.toggle("hidden",!signup);
+  el("name").required=signup;
+  el("name").disabled=!signup;
+  el("authSubmit").textContent=signup?"Create account":"Sign in";
+  el("toggleAuth").textContent=signup?"I already have an account":"Create account";
+  el("password").autocomplete=signup?"new-password":"current-password";
+  el("auth").dataset.signup=signup?"1":"0";
+  el("authError").textContent="";
+  el("authError").classList.remove("error-text");
+}
 function renderTasks(){
   var search=(el("taskSearch").value||"").trim().toLowerCase();
   var filter=el("taskFilter").value||"all";
@@ -411,9 +447,37 @@ function render(){
   updateTimerUI();
 }
 async function refresh(){var data=await api("/api/dashboard");state.tasks=data.tasks||[];state.subjects=data.subjects||[];state.today_minutes=data.today_minutes;state.completed=data.completed;state.settings=data.settings||state.settings;state.weekly_minutes=data.weekly_minutes||[];state.streak_days=data.streak_days||0;state.all_time_minutes=data.all_time_minutes||0;render()}
-async function startApp(user){state.user=user;el("auth").classList.add("hidden");el("app").classList.remove("hidden");await refresh()}
+async function startApp(user){
+  state.user=user;
+  el("auth").classList.add("hidden");
+  el("app").classList.remove("hidden");
+  try{await refresh()}catch(error){
+    showToast("Account is ready, but your dashboard could not load. Please refresh. "+error.message);
+    console.error("JEE360 dashboard initial load failed",error);
+  }
+}
 el("toggleAuth").onclick=function(){authMode(el("auth").dataset.signup!=="1")};
-el("authForm").onsubmit=async function(e){e.preventDefault();var signup=el("auth").dataset.signup==="1";el("authError").textContent="";try{var data=await api(signup?"/api/auth/register":"/api/auth/login",{method:"POST",body:JSON.stringify({name:el("name").value,email:el("email").value,password:el("password").value})});await startApp(data.user)}catch(err){el("authError").textContent=err.message}};
+el("authForm").onsubmit=async function(e){
+  e.preventDefault();
+  var signup=el("auth").dataset.signup==="1";
+  var submit=el("authSubmit");
+  el("authError").textContent="";
+  submit.disabled=true;
+  submit.textContent=signup?"Creating account…":"Signing in…";
+  try{
+    var data=await api(signup?"/api/auth/register":"/api/auth/login",{method:"POST",body:JSON.stringify({name:el("name").value.trim(),email:el("email").value.trim(),password:el("password").value})});
+    if(!data.user)throw new Error("The server did not confirm your account. Please try again.");
+    await startApp(data.user);
+  }catch(err){
+    el("authError").textContent=err.message;
+    el("authError").classList.add("error-text");
+    submit.textContent=signup?"Create account":"Sign in";
+  }finally{
+    submit.disabled=false;
+    if(el("auth").dataset.signup==="1")submit.textContent="Create account";
+    else submit.textContent="Sign in";
+  }
+};
 el("logout").onclick=async function(){await api("/api/auth/logout",{method:"POST",body:"{}"});state.user=null;el("app").classList.add("hidden");el("auth").classList.remove("hidden");el("password").value="";authMode(false)};
 el("addTask").onclick=el("addTaskTop").onclick=function(){openModal("taskModal")};el("closeTask").onclick=function(){closeModal("taskModal")};el("addSubject").onclick=function(){openModal("subjectModal")};el("closeSubject").onclick=function(){closeModal("subjectModal")};
 el("taskForm").onsubmit=async function(e){e.preventDefault();try{await api("/api/tasks",{method:"POST",body:JSON.stringify({title:el("taskTitle").value,description:el("taskDescription").value,subject_id:el("taskSubject").value,priority:el("taskPriority").value,estimated_minutes:el("taskMinutes").value,due_date:el("taskDate").value||null})});el("taskForm").reset();closeModal("taskModal");await refresh();showToast("Task added to your planner.")}catch(err){showToast(err.message)}};
