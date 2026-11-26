@@ -29,6 +29,12 @@ function getCookie(request) {
   return part ? part.slice(COOKIE.length + 1) : "";
 }
 function validEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254; }
+function constantTimeEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
 async function body(request) {
   try { return await request.json(); } catch (_) { return null; }
 }
@@ -100,7 +106,7 @@ async function handleApi(request, env, path) {
     const salt = row ? row.password_salt : "jee360-invalid-user-salt";
     const expected = row ? row.password_hash : "not-a-valid-password-hash";
     const actual = await passwordHash(data.password.slice(0, 128), salt, row ? Number(row.password_iterations) : ITERATIONS);
-    if (!row || actual !== expected) return json({ error: "Email or password is incorrect." }, 401);
+    if (!row || !constantTimeEqual(actual, expected)) return json({ error: "Email or password is incorrect." }, 401);
     const token = await createSession(row.id, env);
     return json({ user: { id: row.id, email: row.email, display_name: row.display_name } }, 200, { "set-cookie": cookie(token, SESSION_DAYS * 86400) });
   }
@@ -122,7 +128,7 @@ async function handleApi(request, env, path) {
     const results = await Promise.all([
       env.DB.prepare("SELECT id,title,description,due_date,priority,status,estimated_minutes,subject_id,created_at FROM tasks WHERE user_id=? ORDER BY CASE status WHEN 'in_progress' THEN 0 WHEN 'todo' THEN 1 ELSE 2 END, due_date IS NULL, due_date LIMIT 100").bind(userId).all(),
       env.DB.prepare("SELECT id,name,color FROM subjects WHERE user_id=? ORDER BY name").bind(userId).all(),
-      env.DB.prepare("SELECT COALESCE(SUM(duration_minutes),0) AS total FROM study_sessions WHERE user_id=? AND studied_on=date('now','localtime')").bind(userId).first(),
+      env.DB.prepare("SELECT COALESCE(SUM(duration_minutes),0) AS total FROM study_sessions WHERE user_id=? AND studied_on=?").bind(userId, new Intl.DateTimeFormat("en-CA", {timeZone:"Asia/Kolkata",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date())).first(),
       env.DB.prepare("SELECT COUNT(*) AS completed FROM tasks WHERE user_id=? AND status='done'").bind(userId).first(),
       env.DB.prepare("SELECT target_exam,daily_goal_minutes,timezone FROM user_settings WHERE user_id=?").bind(userId).first()
     ]);
@@ -183,11 +189,11 @@ async function handleApi(request, env, path) {
       const s = await env.DB.prepare("SELECT id FROM subjects WHERE id=? AND user_id=?").bind(subjectId,userId).first();
       if (!s) return json({ error: "Subject not found." }, 404);
     }
-    await env.DB.prepare("INSERT INTO study_sessions (id,user_id,subject_id,title,duration_minutes,studied_on,notes) VALUES (?,?,?,?,?,date('now','localtime'),?)").bind(crypto.randomUUID(),userId,subjectId,String(data.title || "Study session").slice(0,120),minutes,String(data.notes || "").slice(0,500)).run();
+    await env.DB.prepare("INSERT INTO study_sessions (id,user_id,subject_id,title,duration_minutes,studied_on,notes) VALUES (?,?,?,?,?,?,?)").bind(crypto.randomUUID(),userId,subjectId,String(data.title || "Study session").slice(0,120),minutes,new Intl.DateTimeFormat("en-CA", {timeZone:"Asia/Kolkata",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date()),String(data.notes || "").slice(0,500)).run();
     return json({ ok: true }, 201);
   }
   if (path === "/api/settings" && method === "PATCH") {
-    const data = await body(request);
+    const data = (await body(request)) || {};
     const goal = Math.max(30,Math.min(1440,Number(data.daily_goal_minutes) || 360));
     await env.DB.prepare("INSERT INTO user_settings (user_id,target_exam,daily_goal_minutes,timezone,updated_at) VALUES (?,?,?,?,datetime('now')) ON CONFLICT(user_id) DO UPDATE SET target_exam=excluded.target_exam,daily_goal_minutes=excluded.daily_goal_minutes,timezone=excluded.timezone,updated_at=datetime('now')").bind(userId,String(data.target_exam || "JEE Main + Advanced").slice(0,80),goal,String(data.timezone || "Asia/Kolkata").slice(0,60)).run();
     return json({ ok: true });
