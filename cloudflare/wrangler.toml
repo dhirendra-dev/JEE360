@@ -1,0 +1,9 @@
+name = "jee360"
+main = "worker.js"
+compatibility_date = "2026-11-26"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "jee360-production"
+database_id = "b2b14c90-ea4f-42fd-80e3-c66d013198dc"
+migrations_dir = "migrations"

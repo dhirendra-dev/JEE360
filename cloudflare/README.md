@@ -22,7 +22,18 @@ JEE360 is deployed as an independent Cloudflare Worker with a dedicated D1 datab
 
 ## Database
 
-The production D1 database is named `jee360-production`. Its schema is versioned in `schema.sql`. Apply schema changes using the Cloudflare D1 migration workflow, not during application startup.
+The production D1 database is named `jee360-production` (binding: `DB`). The canonical bootstrap schema is `schema.sql`; versioned, idempotent D1 migrations live in `migrations/` and are configured by `wrangler.toml`.
+
+From this directory, inspect and apply migrations with:
+
+```sh
+npx wrangler d1 migrations list jee360-production --remote
+npx wrangler d1 migrations apply jee360-production --remote
+```
+
+Do not apply schema changes during Worker startup or as a side effect of a deployment. Future schema changes must be new, sequential files (for example, `0002_add_feature.sql`); do not edit an already-applied migration. The initial migration uses `IF NOT EXISTS` so it can safely baseline a database that was previously created from `schema.sql`.
+
+The schema adds database-enforced ownership checks for subject references, case-insensitive per-user subject uniqueness, range constraints, and indexes for the dashboard's user-scoped query paths. The health endpoint probes each required table directly rather than querying SQLite's internal schema catalog.
 
 ## Worker
 
