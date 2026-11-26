@@ -291,7 +291,6 @@ async function handleApi(request, env, path) {
   }
   if (path === "/api/settings" && method === "PATCH") {
     const data = (await body(request)) || {};
-    const goal = Math.max(30,Math.min(1440,Number(data.daily_goal_minutes) || 360));
     const updates = [];
     let targetExam = "JEE Main + Advanced";
     let goal = 360;
