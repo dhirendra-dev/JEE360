@@ -438,6 +438,16 @@ function initTheme(){var saved=null;try{saved=localStorage.getItem("jee360-theme
 initTheme();
 
 function showToast(message){el("toast").textContent=message;el("toast").classList.remove("hidden");setTimeout(function(){el("toast").classList.add("hidden")},2400)}
+async function derivePasswordVerifier(password,saltHex,iterations){
+  var salt=new Uint8Array(saltHex.match(/.{2}/g).map(function(x){return parseInt(x,16)}));
+  var key=await crypto.subtle.importKey("raw",new TextEncoder().encode(password),"PBKDF2",false,["deriveBits"]);
+  var bits=await crypto.subtle.deriveBits({name:"PBKDF2",salt:salt,iterations:iterations,hash:"SHA-256"},key,256);
+  return Array.from(new Uint8Array(bits)).map(function(x){return x.toString(16).padStart(2,"0")}).join("");
+}
+function randomSaltHex(){
+  var bytes=crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes).map(function(x){return x.toString(16).padStart(2,"0")}).join("");
+}
 async function api(path,options){
   options=options||{};
   options.headers=Object.assign({"content-type":"application/json"},options.headers||{});
@@ -547,7 +557,24 @@ el("authForm").onsubmit=async function(e){
   submit.disabled=true;
   submit.textContent=signup?"Creating account…":"Signing in…";
   try{
-    var data=await api(signup?"/api/auth/register":"/api/auth/login",{method:"POST",body:JSON.stringify({name:el("name").value.trim(),email:el("email").value.trim(),password:el("password").value})});
+    var email=el("email").value.trim();
+    var password=el("password").value;
+    var payload;
+    if(signup){
+      if(password.length<10||password.length>128)throw new Error("Use a password between 10 and 128 characters.");
+      var salt=randomSaltHex();
+      var verifier=await derivePasswordVerifier(password,salt,310000);
+      payload={name:el("name").value.trim(),email:email,salt:salt,password_verifier:verifier};
+    }else{
+      var challenge=await api("/api/auth/challenge",{method:"POST",body:JSON.stringify({email:email})});
+      if(challenge.scheme==="pbkdf2-client-sha256"){
+        var verifier=await derivePasswordVerifier(password,challenge.salt,challenge.iterations);
+        payload={email:email,password_verifier:verifier};
+      }else{
+        payload={email:email,password:password};
+      }
+    }
+    var data=await api(signup?"/api/auth/register":"/api/auth/login",{method:"POST",body:JSON.stringify(payload)});
     if(!data.user)throw new Error("The server did not confirm your account. Please try again.");
     await startApp(data.user);
   }catch(err){
@@ -567,7 +594,21 @@ el("subjectForm").onsubmit=async function(e){e.preventDefault();try{await api("/
 el("tasks").onclick=async function(e){var toggle=e.target.closest("[data-toggle]");var del=e.target.closest("[data-delete]");try{if(toggle){var task=state.tasks.find(function(t){return t.id===toggle.dataset.toggle});await api("/api/tasks/"+task.id,{method:"PATCH",body:JSON.stringify({status:task.status==="done"?"todo":"done"})});await refresh()}if(del){await api("/api/tasks/"+del.dataset.delete,{method:"DELETE"});await refresh();showToast("Task deleted.")}}catch(err){showToast(err.message)}};
 el("studyForm").onsubmit=async function(e){e.preventDefault();try{await api("/api/study-sessions",{method:"POST",body:JSON.stringify({title:el("studyTitle").value||"Study session",subject_id:el("studySubject").value,duration_minutes:el("studyMinutes").value})});el("studyTitle").value="";await refresh();showToast("Study session saved. Keep it up!") }catch(err){showToast(err.message)}};
 el("saveGoal").onclick=async function(){try{await api("/api/settings",{method:"PATCH",body:JSON.stringify({daily_goal_minutes:el("dailyGoal").value})});await refresh();showToast("Daily target updated.")}catch(err){showToast(err.message)}};
-el("passwordForm").onsubmit=async function(e){e.preventDefault();try{await api("/api/auth/password",{method:"POST",body:JSON.stringify({current_password:el("currentPassword").value,new_password:el("newPassword").value})});el("passwordForm").reset();showToast("Password changed. Other sessions were signed out.")}catch(err){showToast(err.message)}};
+el("passwordForm").onsubmit=async function(e){
+  e.preventDefault();
+  try{
+    var challenge=await api("/api/auth/password/challenge");
+    var currentPassword=el("currentPassword").value;
+    var currentVerifier=null;
+    if(challenge.scheme==="pbkdf2-client-sha256")currentVerifier=await derivePasswordVerifier(currentPassword,challenge.salt,challenge.iterations);
+    var newPassword=el("newPassword").value;
+    if(newPassword.length<10||newPassword.length>128)throw new Error("Use a new password between 10 and 128 characters.");
+    var newSalt=randomSaltHex();
+    var newVerifier=await derivePasswordVerifier(newPassword,newSalt,310000);
+    await api("/api/auth/password",{method:"POST",body:JSON.stringify({current_verifier:currentVerifier,current_password:challenge.scheme==="pbkdf2-client-sha256"?undefined:currentPassword,new_salt:newSalt,new_verifier:newVerifier})});
+    el("passwordForm").reset();showToast("Password changed. Other sessions were signed out.");
+  }catch(err){showToast(err.message)}
+};
 function formatTimer(seconds){var safe=Math.max(0,seconds);return String(Math.floor(safe/60)).padStart(2,"0")+":"+String(safe%60).padStart(2,"0")}
 function updateTimerUI(){
   var progress=timer.duration?1-timer.remaining/timer.duration:0;
