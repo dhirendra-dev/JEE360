@@ -45,6 +45,15 @@ async function userFor(request, env) {
   const row = await env.DB.prepare("SELECT u.id,u.email,u.display_name,u.created_at,s.expires_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?").bind(hash, new Date().toISOString()).first();
   return row || null;
 }
+async function rateLimited(request, env, action, limit, windowSeconds) {
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  const key = await digest(ip + ":" + action);
+  const now = Math.floor(Date.now() / 1000);
+  const cutoff = now - windowSeconds;
+  await env.DB.prepare("INSERT INTO auth_rate_limits (key,hits,window_start) VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET hits=CASE WHEN window_start<=? THEN 1 ELSE hits+1 END,window_start=CASE WHEN window_start<=? THEN excluded.window_start ELSE window_start END").bind(key, now, cutoff, cutoff).run();
+  const row = await env.DB.prepare("SELECT hits FROM auth_rate_limits WHERE key=?").bind(key).first();
+  return Number(row && row.hits) > limit;
+}
 async function createSession(userId, env) {
   const token = randomHex(32);
   const hash = await digest(token);
@@ -71,8 +80,7 @@ async function handleApi(request, env, path) {
     const name = data.name.trim().slice(0, 60);
     if (!name || !validEmail(email)) return json({ error: "Enter a valid name and email address." }, 400);
     if (data.password.length < 10 || data.password.length > 128) return json({ error: "Use a password between 10 and 128 characters." }, 400);
-    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE created_at > datetime('now','-1 hour')").first();
-    if (Number(count.n) > 40) return json({ error: "Sign-up is temporarily limited. Please try again later." }, 429);
+    if (await rateLimited(request, env, "register", 5, 3600)) return json({ error: "Too many sign-up attempts. Please try again later." }, 429);
     const id = crypto.randomUUID();
     const salt = randomHex(16);
     const hash = await passwordHash(data.password, salt, ITERATIONS);
@@ -87,6 +95,7 @@ async function handleApi(request, env, path) {
     const data = await body(request);
     if (!data || typeof data.email !== "string" || typeof data.password !== "string") return json({ error: "Enter your email and password." }, 400);
     const email = data.email.trim().toLowerCase();
+    if (await rateLimited(request, env, "login", 10, 900)) return json({ error: "Too many sign-in attempts. Please wait 15 minutes." }, 429);
     const row = await env.DB.prepare("SELECT id,email,display_name,password_salt,password_hash,password_iterations FROM users WHERE email=?").bind(email).first();
     const salt = row ? row.password_salt : "jee360-invalid-user-salt";
     const expected = row ? row.password_hash : "not-a-valid-password-hash";
@@ -136,7 +145,7 @@ async function handleApi(request, env, path) {
   }
   const taskMatch = path.match(/^\/api\/tasks\/([a-f0-9-]+)$/i);
   if (taskMatch && method === "PATCH") {
-    const data = await body(request);
+    const data = (await body(request)) || {};
     const id = taskMatch[1];
     const task = await env.DB.prepare("SELECT id FROM tasks WHERE id=? AND user_id=?").bind(id,userId).first();
     if (!task) return json({ error: "Task not found." }, 404);
@@ -147,7 +156,8 @@ async function handleApi(request, env, path) {
     if (Object.keys(allowed).length) {
       const keys = Object.keys(allowed);
       const sql = "UPDATE tasks SET " + keys.map(function(k) { return k + "=?"; }).join(",") + ",updated_at=datetime('now') WHERE id=? AND user_id=?";
-      await env.DB.prepare(sql).bind.apply(null, keys.map(function(k) { return allowed[k]; }).concat([id,userId])).run();
+      const statement = env.DB.prepare(sql);
+      await statement.bind.apply(statement, keys.map(function(k) { return allowed[k]; }).concat([id,userId])).run();
     }
     return json({ ok: true });
   }
