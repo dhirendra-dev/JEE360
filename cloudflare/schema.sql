@@ -64,3 +64,87 @@ CREATE TABLE IF NOT EXISTS auth_rate_limits (
   hits INTEGER NOT NULL DEFAULT 0,
   window_start INTEGER NOT NULL
 );
+-- Query-path indexes and tenant-safe subject relationships.
+CREATE INDEX IF NOT EXISTS sessions_user_expiry_idx ON sessions(user_id, expires_at);
+CREATE INDEX IF NOT EXISTS tasks_user_status_due_idx ON tasks(user_id, status, due_date);
+CREATE INDEX IF NOT EXISTS tasks_subject_user_idx ON tasks(subject_id, user_id);
+CREATE INDEX IF NOT EXISTS study_sessions_user_date_subject_idx ON study_sessions(user_id, studied_on, subject_id);
+CREATE INDEX IF NOT EXISTS study_sessions_subject_user_idx ON study_sessions(subject_id, user_id);
+CREATE INDEX IF NOT EXISTS auth_rate_limits_window_idx ON auth_rate_limits(window_start);
+CREATE UNIQUE INDEX IF NOT EXISTS subjects_user_name_nocase_idx ON subjects(user_id, name COLLATE NOCASE);
+
+-- The API checks ownership too; these triggers make the database enforce it
+-- even if a future endpoint forgets the user-scoped lookup.
+CREATE TRIGGER IF NOT EXISTS tasks_subject_owner_insert
+BEFORE INSERT ON tasks
+WHEN NEW.subject_id IS NOT NULL
+ AND NOT EXISTS (SELECT 1 FROM subjects WHERE id = NEW.subject_id AND user_id = NEW.user_id)
+BEGIN
+  SELECT RAISE(ABORT, 'task subject must belong to the same user');
+END;
+
+CREATE TRIGGER IF NOT EXISTS tasks_subject_owner_update
+BEFORE UPDATE OF user_id, subject_id ON tasks
+WHEN NEW.subject_id IS NOT NULL
+ AND NOT EXISTS (SELECT 1 FROM subjects WHERE id = NEW.subject_id AND user_id = NEW.user_id)
+BEGIN
+  SELECT RAISE(ABORT, 'task subject must belong to the same user');
+END;
+
+CREATE TRIGGER IF NOT EXISTS study_sessions_subject_owner_insert
+BEFORE INSERT ON study_sessions
+WHEN NEW.subject_id IS NOT NULL
+ AND NOT EXISTS (SELECT 1 FROM subjects WHERE id = NEW.subject_id AND user_id = NEW.user_id)
+BEGIN
+  SELECT RAISE(ABORT, 'study subject must belong to the same user');
+END;
+
+CREATE TRIGGER IF NOT EXISTS study_sessions_subject_owner_update
+BEFORE UPDATE OF user_id, subject_id ON study_sessions
+WHEN NEW.subject_id IS NOT NULL
+ AND NOT EXISTS (SELECT 1 FROM subjects WHERE id = NEW.subject_id AND user_id = NEW.user_id)
+BEGIN
+  SELECT RAISE(ABORT, 'study subject must belong to the same user');
+END;
+
+CREATE TRIGGER IF NOT EXISTS tasks_minutes_insert
+BEFORE INSERT ON tasks
+WHEN NEW.estimated_minutes < 5 OR NEW.estimated_minutes > 1440
+BEGIN
+  SELECT RAISE(ABORT, 'estimated_minutes must be between 5 and 1440');
+END;
+
+CREATE TRIGGER IF NOT EXISTS tasks_minutes_update
+BEFORE UPDATE OF estimated_minutes ON tasks
+WHEN NEW.estimated_minutes < 5 OR NEW.estimated_minutes > 1440
+BEGIN
+  SELECT RAISE(ABORT, 'estimated_minutes must be between 5 and 1440');
+END;
+
+CREATE TRIGGER IF NOT EXISTS study_duration_insert
+BEFORE INSERT ON study_sessions
+WHEN NEW.duration_minutes < 1 OR NEW.duration_minutes > 1440
+BEGIN
+  SELECT RAISE(ABORT, 'duration_minutes must be between 1 and 1440');
+END;
+
+CREATE TRIGGER IF NOT EXISTS study_duration_update
+BEFORE UPDATE OF duration_minutes ON study_sessions
+WHEN NEW.duration_minutes < 1 OR NEW.duration_minutes > 1440
+BEGIN
+  SELECT RAISE(ABORT, 'duration_minutes must be between 1 and 1440');
+END;
+
+CREATE TRIGGER IF NOT EXISTS user_settings_goal_insert
+BEFORE INSERT ON user_settings
+WHEN NEW.daily_goal_minutes < 30 OR NEW.daily_goal_minutes > 1440
+BEGIN
+  SELECT RAISE(ABORT, 'daily_goal_minutes must be between 30 and 1440');
+END;
+
+CREATE TRIGGER IF NOT EXISTS user_settings_goal_update
+BEFORE UPDATE OF daily_goal_minutes ON user_settings
+WHEN NEW.daily_goal_minutes < 30 OR NEW.daily_goal_minutes > 1440
+BEGIN
+  SELECT RAISE(ABORT, 'daily_goal_minutes must be between 30 and 1440');
+END;
