@@ -41,3 +41,10 @@ test("settings updates preserve fields omitted from a PATCH request", () => {
   assert.match(worker, /updates\.push\("target_exam=excluded\.target_exam"\)/);
   assert.match(worker, /updates\.push\("timezone=excluded\.timezone"\)/);
 });
+
+test("D1 foreign keys rely on the platform's enforced default", async () => {
+  const migration = await readFile(new URL("../cloudflare/migrations/0001_initial_schema.sql", import.meta.url), "utf8");
+  assert.doesNotMatch(schema, /PRAGMA foreign_keys/i);
+  assert.doesNotMatch(migration, /PRAGMA foreign_keys/i);
+  assert.match(schema, /REFERENCES users\(id\) ON DELETE CASCADE/);
+});
