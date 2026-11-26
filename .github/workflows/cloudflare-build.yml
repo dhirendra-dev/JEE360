@@ -35,6 +35,11 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund --legacy-peer-deps
 
+      - name: Validate standalone Worker and D1 backend
+        run: |
+          node --check cloudflare/worker.js
+          node --test scripts/d1-backend.test.mjs
+
       - name: Check TanStack app scaffold
         id: app
         shell: bash
