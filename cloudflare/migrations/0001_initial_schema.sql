@@ -1,4 +1,4 @@
-PRAGMA foreign_keys = ON;
+-- Idempotent baseline for the dedicated JEE360 D1 database.
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   email TEXT NOT NULL UNIQUE COLLATE NOCASE,
