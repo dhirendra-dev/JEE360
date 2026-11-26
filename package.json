@@ -20,7 +20,6 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "build:cloudflare": "NITRO_PRESET=cloudflare_module node scripts/with-app-env.mjs vite build",
-    "build:vercel": "NITRO_PRESET=vercel node scripts/with-app-env.mjs vite build",
     "deploy:cloudflare": "npm run build:cloudflare && cd .output/server && npx wrangler deploy"
   },
   "dependencies": {
