@@ -1,0 +1,44 @@
+name: Cloudflare Workers build
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "**"
+      - "!README.md"
+  push:
+    branches:
+      - feat/cloudflare-workers-migration
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Cloudflare Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund --legacy-peer-deps
+
+      - name: Build for Cloudflare Workers
+        run: npm run build:cloudflare
+
+      - name: Verify Nitro Worker output
+        run: |
+          test -f .output/server/index.mjs
+          test -f .output/server/wrangler.json
