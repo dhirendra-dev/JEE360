@@ -29,6 +29,7 @@ function getCookie(request) {
   return part ? part.slice(COOKIE.length + 1) : "";
 }
 function validEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254; }
+function validHex(value, length) { return typeof value === "string" && value.length === length && /^[0-9a-f]+$/i.test(value); }
 function validDate(value) {
   if (value == null || value === "") return true;
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -102,23 +103,32 @@ async function handleApi(request, env, path) {
     ]);
     return json({ ok: true, service: "JEE360", database: "connected", schema_version: 1 });
   }
+  if (path === "/api/auth/challenge" && method === "POST") {
+    const data = await body(request);
+    if (!data || typeof data.email !== "string") return json({ error: "Enter your email address." }, 400);
+    const email = data.email.trim().toLowerCase();
+    if (!validEmail(email)) return json({ error: "Enter a valid email address." }, 400);
+    if (await rateLimited(request, env, "login-challenge", 20, 900)) return json({ error: "Too many sign-in attempts. Please wait 15 minutes." }, 429);
+    const row = await env.DB.prepare("SELECT password_salt,password_iterations,password_hash_scheme FROM users WHERE email=?").bind(email).first();
+    return json({ salt: row ? row.password_salt : randomHex(16), iterations: row ? Number(row.password_iterations) : ITERATIONS, scheme: row && row.password_hash_scheme ? row.password_hash_scheme : (row ? "pbkdf2-server" : "pbkdf2-client-sha256") });
+  }
   if (path === "/api/auth/register" && method === "POST") {
     const data = await body(request);
-    if (!data || typeof data.email !== "string" || typeof data.password !== "string" || typeof data.name !== "string") return json({ error: "Please provide your name, email and password." }, 400);
+    if (!data || typeof data.email !== "string" || typeof data.password_verifier !== "string" || typeof data.salt !== "string" || typeof data.name !== "string") return json({ error: "Please provide your name, email and password." }, 400);
     const email = data.email.trim().toLowerCase();
     const name = data.name.trim().slice(0, 60);
     if (!name || !validEmail(email)) return json({ error: "Enter a valid name and email address." }, 400);
-    if (data.password.length < 10 || data.password.length > 128) return json({ error: "Use a password between 10 and 128 characters." }, 400);
+    if (!validHex(data.salt, 32) || !validHex(data.password_verifier, 64)) return json({ error: "Your password could not be verified. Please try again." }, 400);
     if (await rateLimited(request, env, "register", 12, 900)) return json({ error: "Too many sign-up attempts from this connection. Please wait 15 minutes, then try again." }, 429);
     const id = crypto.randomUUID();
     const salt = randomHex(16);
-    const hash = await passwordHash(data.password, salt, ITERATIONS);
+    const hash = await digest(data.password_verifier);
     const token = randomHex(32);
     const tokenHash = await digest(token);
     const expires = new Date(Date.now() + SESSION_DAYS * 86400000).toISOString();
     try {
       await env.DB.batch([
-        env.DB.prepare("INSERT INTO users (id,email,display_name,password_salt,password_hash,password_iterations) VALUES (?,?,?,?,?,?)").bind(id, email, name, salt, hash, ITERATIONS),
+        env.DB.prepare("INSERT INTO users (id,email,display_name,password_salt,password_hash,password_iterations,password_hash_scheme) VALUES (?,?,?,?,?,?,?)").bind(id, email, name, data.salt, hash, ITERATIONS, "pbkdf2-client-sha256"),
         env.DB.prepare("INSERT INTO user_settings (user_id) VALUES (?)").bind(id),
         env.DB.prepare("INSERT INTO sessions (id,user_id,token_hash,expires_at) VALUES (?,?,?,?)").bind(crypto.randomUUID(), id, tokenHash, expires)
       ]);
@@ -135,11 +145,17 @@ async function handleApi(request, env, path) {
     if (!data || typeof data.email !== "string" || typeof data.password !== "string") return json({ error: "Enter your email and password." }, 400);
     const email = data.email.trim().toLowerCase();
     if (await rateLimited(request, env, "login", 12, 900)) return json({ error: "Too many sign-in attempts. Please wait 15 minutes." }, 429);
-    const row = await env.DB.prepare("SELECT id,email,display_name,password_salt,password_hash,password_iterations FROM users WHERE email=?").bind(email).first();
-    const salt = row ? row.password_salt : "jee360-invalid-user-salt";
-    const expected = row ? row.password_hash : "not-a-valid-password-hash";
-    const actual = await passwordHash(data.password.slice(0, 128), salt, row ? Number(row.password_iterations) : ITERATIONS);
-    if (!row || !constantTimeEqual(actual, expected)) return json({ error: "Email or password is incorrect." }, 401);
+    const row = await env.DB.prepare("SELECT id,email,display_name,password_salt,password_hash,password_iterations,password_hash_scheme FROM users WHERE email=?").bind(email).first();
+    let actual;
+    if (row && row.password_hash_scheme === "pbkdf2-client-sha256") {
+      if (!validHex(data.password_verifier, 64)) return json({ error: "Email or password is incorrect." }, 401);
+      actual = await digest(data.password_verifier);
+    } else {
+      if (typeof data.password !== "string") return json({ error: "Email or password is incorrect." }, 401);
+      const salt = row ? row.password_salt : "jee360-invalid-user-salt";
+      actual = await passwordHash(data.password.slice(0, 128), salt, row ? Number(row.password_iterations) : ITERATIONS);
+    }
+    if (!row || !constantTimeEqual(actual, row.password_hash)) return json({ error: "Email or password is incorrect." }, 401);
     const token = await createSession(row.id, env);
     return json({ user: { id: row.id, email: row.email, display_name: row.display_name } }, 200, { "set-cookie": cookie(token, SESSION_DAYS * 86400) });
   }
