@@ -11,6 +11,7 @@ JEE360 is deployed as an independent Cloudflare Worker with a dedicated D1 datab
 - Study-session logging and daily study goal
 - Server-side ownership checks for every private record
 - Same-origin mutation checks and input validation
+- Per-IP authentication attempt throttling and constant-time password-hash comparison
 
 ## Database
 
@@ -19,6 +20,10 @@ The production D1 database is named `jee360-production`. Its schema is versioned
 ## Worker
 
 Entry point: `worker.js`
+
+Public app: https://jee360.jeeprephubofficial.workers.dev
+
+Health endpoint: https://jee360.jeeprephubofficial.workers.dev/api/health
 
 Required binding:
 
