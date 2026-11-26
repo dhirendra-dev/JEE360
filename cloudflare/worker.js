@@ -185,7 +185,7 @@ async function handleApi(request, env, path) {
   return json({ error: "Not found." }, 404);
 }
 
-const PAGE = String.raw\`<!doctype html>
+const PAGE = String.raw`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#090d18"><title>JEE360 — Your preparation, in focus</title>
 <style>
 :root{color-scheme:dark;--bg:#090d18;--panel:#111a2b;--panel2:#162238;--line:#26344c;--muted:#8b9bb5;--text:#f3f6fc;--blue:#8295ff;--cyan:#62d5d0;--good:#55d6a2;--warn:#f6c56f;--red:#ff8294}
@@ -221,7 +221,7 @@ el("tasks").onclick=async function(e){var toggle=e.target.closest("[data-toggle]
 el("studyForm").onsubmit=async function(e){e.preventDefault();try{await api("/api/study-sessions",{method:"POST",body:JSON.stringify({title:el("studyTitle").value||"Study session",subject_id:el("studySubject").value,duration_minutes:el("studyMinutes").value})});el("studyTitle").value="";await refresh();showToast("Study session saved. Keep it up!") }catch(err){showToast(err.message)}};
 el("saveGoal").onclick=async function(){try{await api("/api/settings",{method:"PATCH",body:JSON.stringify({daily_goal_minutes:el("dailyGoal").value})});await refresh();showToast("Daily target updated.")}catch(err){showToast(err.message)}};
 api("/api/auth/me").then(function(data){if(data.user)startApp(data.user)}).catch(function(){});
-</script></body></html>\`;
+</script></body></html>`;
 
 export default {
   async fetch(request, env) {
