@@ -29,6 +29,16 @@ function getCookie(request) {
   return part ? part.slice(COOKIE.length + 1) : "";
 }
 function validEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254; }
+function validDate(value) {
+  if (value == null || value === "") return true;
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(value + "T00:00:00Z");
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+function validTimezone(value) {
+  if (typeof value !== "string" || !value || value.length > 80) return false;
+  try { new Intl.DateTimeFormat("en-US", { timeZone: value }); return true; } catch (_) { return false; }
+}
 function constantTimeEqual(a, b) {
   if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
   let diff = 0;
@@ -40,9 +50,10 @@ async function body(request) {
 }
 function sameOrigin(request) {
   const origin = request.headers.get("Origin");
-  if (!origin) return true;
   const url = new URL(request.url);
-  return origin === url.origin;
+  if (origin) return origin === url.origin;
+  if (request.method === "GET" || request.method === "HEAD") return true;
+  return request.headers.get("Sec-Fetch-Site") === "same-origin";
 }
 async function userFor(request, env) {
   const token = getCookie(request);
@@ -56,7 +67,11 @@ async function rateLimited(request, env, action, limit, windowSeconds) {
   const key = await digest(ip + ":" + action);
   const now = Math.floor(Date.now() / 1000);
   const cutoff = now - windowSeconds;
-  await env.DB.prepare("INSERT INTO auth_rate_limits (key,hits,window_start) VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET hits=CASE WHEN window_start<=? THEN 1 ELSE hits+1 END,window_start=CASE WHEN window_start<=? THEN excluded.window_start ELSE window_start END").bind(key, now, cutoff, cutoff).run();
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO auth_rate_limits (key,hits,window_start) VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET hits=CASE WHEN window_start<=? THEN 1 ELSE hits+1 END,window_start=CASE WHEN window_start<=? THEN excluded.window_start ELSE window_start END").bind(key, now, cutoff, cutoff),
+    env.DB.prepare("DELETE FROM auth_rate_limits WHERE window_start < ?").bind(now - 86400),
+    env.DB.prepare("DELETE FROM sessions WHERE expires_at <= ?").bind(new Date(now * 1000).toISOString())
+  ]);
   const row = await env.DB.prepare("SELECT hits FROM auth_rate_limits WHERE key=?").bind(key).first();
   return Number(row && row.hits) > limit;
 }
@@ -76,8 +91,16 @@ async function handleApi(request, env, path) {
   if (!sameOrigin(request)) return json({ error: "Cross-origin request blocked." }, 403);
   const method = request.method;
   if (path === "/api/health" && method === "GET") {
-    const row = await env.DB.prepare("SELECT COUNT(*) AS tables_ready FROM sqlite_master WHERE type='table' AND name IN ('users','sessions','tasks','subjects','study_sessions','user_settings')").first();
-    return json({ ok: true, service: "JEE360", database: Number(row.tables_ready) === 6 ? "connected" : "schema-incomplete" });
+    await env.DB.batch([
+      env.DB.prepare("SELECT 1 FROM users LIMIT 0"),
+      env.DB.prepare("SELECT 1 FROM sessions LIMIT 0"),
+      env.DB.prepare("SELECT 1 FROM tasks LIMIT 0"),
+      env.DB.prepare("SELECT 1 FROM subjects LIMIT 0"),
+      env.DB.prepare("SELECT 1 FROM study_sessions LIMIT 0"),
+      env.DB.prepare("SELECT 1 FROM user_settings LIMIT 0"),
+      env.DB.prepare("SELECT 1 FROM auth_rate_limits LIMIT 0")
+    ]);
+    return json({ ok: true, service: "JEE360", database: "connected", schema_version: 1 });
   }
   if (path === "/api/auth/register" && method === "POST") {
     const data = await body(request);
@@ -145,11 +168,14 @@ async function handleApi(request, env, path) {
     if (!constantTimeEqual(currentHash, account.password_hash)) return json({ error: "Your current password is incorrect." }, 401);
     const salt = randomHex(16);
     const hash = await passwordHash(data.new_password, salt, ITERATIONS);
-    await env.DB.prepare("UPDATE users SET password_salt=?,password_hash=?,password_iterations=? WHERE id=?").bind(salt, hash, ITERATIONS, userId).run();
-    const oldToken = getCookie(request);
-    const oldHash = oldToken ? await digest(oldToken) : "";
-    const token = await createSession(userId, env);
-    if (oldHash) await env.DB.prepare("DELETE FROM sessions WHERE user_id=? AND token_hash<>?").bind(userId, await digest(token)).run();
+    const token = randomHex(32);
+    const tokenHash = await digest(token);
+    const expires = new Date(Date.now() + SESSION_DAYS * 86400000).toISOString();
+    await env.DB.batch([
+      env.DB.prepare("UPDATE users SET password_salt=?,password_hash=?,password_iterations=?,updated_at=datetime('now') WHERE id=?").bind(salt, hash, ITERATIONS, userId),
+      env.DB.prepare("INSERT INTO sessions (id,user_id,token_hash,expires_at) VALUES (?,?,?,?)").bind(crypto.randomUUID(), userId, tokenHash, expires),
+      env.DB.prepare("DELETE FROM sessions WHERE user_id=? AND token_hash<>?").bind(userId, tokenHash)
+    ]);
     return json({ ok: true }, 200, { "set-cookie": cookie(token, SESSION_DAYS * 86400) });
   }
   if (path === "/api/dashboard" && method === "GET") {
@@ -200,14 +226,18 @@ async function handleApi(request, env, path) {
     if (!data || typeof data.title !== "string" || !data.title.trim()) return json({ error: "Task title is required." }, 400);
     const priority = ["low","medium","high"].includes(data.priority) ? data.priority : "medium";
     const status = ["todo","in_progress","done"].includes(data.status) ? data.status : "todo";
-    const mins = Math.max(5, Math.min(1440, Number(data.estimated_minutes) || 30));
+    const mins = data.estimated_minutes == null || data.estimated_minutes === "" ? 30 : Number(data.estimated_minutes);
+    if (!Number.isInteger(mins) || mins < 5 || mins > 1440) return json({ error: "Estimated time must be between 5 and 1,440 whole minutes." }, 400);
+    const dueDate = data.due_date == null || data.due_date === "" ? null : data.due_date;
+    if (!validDate(dueDate)) return json({ error: "Enter a valid due date." }, 400);
+    if (data.subject_id != null && data.subject_id !== "" && typeof data.subject_id !== "string") return json({ error: "Choose a valid subject." }, 400);
     const id = crypto.randomUUID();
     const subjectId = typeof data.subject_id === "string" && data.subject_id ? data.subject_id : null;
     if (subjectId) {
       const s = await env.DB.prepare("SELECT id FROM subjects WHERE id=? AND user_id=?").bind(subjectId,userId).first();
       if (!s) return json({ error: "Subject not found." }, 404);
     }
-    await env.DB.prepare("INSERT INTO tasks (id,user_id,subject_id,title,description,due_date,priority,status,estimated_minutes) VALUES (?,?,?,?,?,?,?,?,?)").bind(id,userId,subjectId,data.title.trim().slice(0,140),String(data.description || "").slice(0,1000),data.due_date || null,priority,status,mins).run();
+    await env.DB.prepare("INSERT INTO tasks (id,user_id,subject_id,title,description,due_date,priority,status,estimated_minutes) VALUES (?,?,?,?,?,?,?,?,?)").bind(id,userId,subjectId,data.title.trim().slice(0,140),String(data.description || "").slice(0,1000),dueDate,priority,status,mins).run();
     return json({ id: id }, 201);
   }
   const taskMatch = path.match(/^\/api\/tasks\/([a-f0-9-]+)$/i);
@@ -238,14 +268,20 @@ async function handleApi(request, env, path) {
     const id = crypto.randomUUID();
     try {
       await env.DB.prepare("INSERT INTO subjects (id,user_id,name,color) VALUES (?,?,?,?)").bind(id,userId,data.name.trim().slice(0,50),/^#[0-9a-f]{6}$/i.test(data.color || "") ? data.color : "#7c8cf8").run();
-    } catch (_) { return json({ error: "That subject already exists." }, 409); }
+    } catch (error) {
+      const message = String(error && error.message || "");
+      if (/unique constraint|already exists/i.test(message)) return json({ error: "That subject already exists." }, 409);
+      console.error("JEE360 subject insert failed", error);
+      return json({ error: "We couldn't save that subject. Please try again." }, 500);
+    }
     return json({ id: id }, 201);
   }
   if (path === "/api/study-sessions" && method === "POST") {
-    const data = await body(request);
-    const minutes = Math.max(1,Math.min(1440,Number(data && data.duration_minutes) || 0));
-    if (!minutes) return json({ error: "Enter a valid study duration." }, 400);
-    const subjectId = data.subject_id || null;
+    const data = (await body(request)) || {};
+    const minutes = Number(data.duration_minutes);
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) return json({ error: "Study duration must be between 1 and 1,440 whole minutes." }, 400);
+    if (data.subject_id != null && data.subject_id !== "" && typeof data.subject_id !== "string") return json({ error: "Choose a valid subject." }, 400);
+    const subjectId = typeof data.subject_id === "string" && data.subject_id ? data.subject_id : null;
     if (subjectId) {
       const s = await env.DB.prepare("SELECT id FROM subjects WHERE id=? AND user_id=?").bind(subjectId,userId).first();
       if (!s) return json({ error: "Subject not found." }, 404);
@@ -256,7 +292,26 @@ async function handleApi(request, env, path) {
   if (path === "/api/settings" && method === "PATCH") {
     const data = (await body(request)) || {};
     const goal = Math.max(30,Math.min(1440,Number(data.daily_goal_minutes) || 360));
-    await env.DB.prepare("INSERT INTO user_settings (user_id,target_exam,daily_goal_minutes,timezone,updated_at) VALUES (?,?,?,?,datetime('now')) ON CONFLICT(user_id) DO UPDATE SET target_exam=excluded.target_exam,daily_goal_minutes=excluded.daily_goal_minutes,timezone=excluded.timezone,updated_at=datetime('now')").bind(userId,String(data.target_exam || "JEE Main + Advanced").slice(0,80),goal,String(data.timezone || "Asia/Kolkata").slice(0,60)).run();
+    const updates = [];
+    let targetExam = "JEE Main + Advanced";
+    let goal = 360;
+    let timezone = "Asia/Kolkata";
+    if (Object.prototype.hasOwnProperty.call(data, "target_exam")) {
+      if (typeof data.target_exam !== "string" || !data.target_exam.trim() || data.target_exam.length > 80) return json({ error: "Enter a valid target exam." }, 400);
+      targetExam = data.target_exam.trim(); updates.push("target_exam=excluded.target_exam");
+    }
+    if (Object.prototype.hasOwnProperty.call(data, "daily_goal_minutes")) {
+      goal = Number(data.daily_goal_minutes);
+      if (!Number.isInteger(goal) || goal < 30 || goal > 1440) return json({ error: "Daily goal must be between 30 and 1,440 whole minutes." }, 400);
+      updates.push("daily_goal_minutes=excluded.daily_goal_minutes");
+    }
+    if (Object.prototype.hasOwnProperty.call(data, "timezone")) {
+      timezone = data.timezone;
+      if (!validTimezone(timezone)) return json({ error: "Choose a valid time zone." }, 400);
+      updates.push("timezone=excluded.timezone");
+    }
+    const sql = "INSERT INTO user_settings (user_id,target_exam,daily_goal_minutes,timezone,updated_at) VALUES (?,?,?,?,datetime('now')) ON CONFLICT(user_id) DO UPDATE SET " + (updates.length ? updates.join(",") + "," : "") + "updated_at=datetime('now')";
+    await env.DB.prepare(sql).bind(userId,targetExam,goal,timezone).run();
     return json({ ok: true });
   }
   return json({ error: "Not found." }, 404);
